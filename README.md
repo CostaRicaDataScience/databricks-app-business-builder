@@ -8,7 +8,8 @@ Unified implementation of Composer + AppGen patterns for building Databricks App
 2. Runs discovery on requested tables and genie assets.
 3. Proposes metadata enrichment and records approval gates.
 4. Builds an app plan with Foundation Models (Claude preferred).
-5. Generates a Streamlit app scaffold.
+5. Emits a **cascarón** (scaffold) for the Streamlit app, then optionally builds
+   it out with Claude Opus (two-phase generation — see below).
 6. Runs preflight checks and emits governance/tagging reports.
 
 Artifacts are persisted under `.appgen/` for reproducibility and auditability.
@@ -101,7 +102,8 @@ Environment keys (see `.env.example`):
 - `DBX_SP_CLIENT_ID`
 - `DBX_SP_CLIENT_SECRET`
 - `FOUNDATION_MODEL_PROVIDER`
-- `FOUNDATION_MODEL_ENDPOINT` — serving endpoint used for GenAI codegen
+- `FOUNDATION_MODEL_ENDPOINT` — serving endpoint used for GenAI codegen (Phase A preview)
+- `PLANNER_MODEL_ENDPOINT` — separate Opus-class endpoint for the Phase B build-out (default `databricks-claude-opus-4`)
 - `PREFERRED_MODEL`
 - `FALLBACK_MODEL`
 - `APPGEN_DIR`
@@ -147,6 +149,8 @@ Artifacts are written under `.appgen/`:
 - `metadata_quality_report.yaml`
 - `app_spec.yaml`
 - `final_build_plan.yaml`
+- `generated_app_report.yaml`
+- `cascaron_buildout_report.yaml` — manifest/plan/contracts paths + Phase B result
 - `tagging_report.yaml`
 - approvals in `.appgen/approvals/`
 
@@ -267,6 +271,81 @@ authenticated workspace (`FOUNDATION_MODEL_ENDPOINT`, default
 model output is written to disk by `src/composer/codegen/generator.py`. When no
 workspace/endpoint is available (local dev, tests, headless), a **deterministic
 template fallback** is used so the flow always completes.
+
+## Two-phase generation (cascarón → build-out)
+
+Instead of a 3-file stub, each generated app is a **cascarón** (scaffold) — the
+shell of a Databricks App with everything an LLM needs to then write the full
+implementation. Modeled on the OmniAgent bootstrap conventions, adapted for a
+single Databricks Streamlit App.
+
+### Phase A — deterministic cascarón (always, offline-safe)
+
+`src/composer/codegen/cascaron.py::emit_cascaron` writes a self-describing
+scaffold under `OUTPUT_ROOT/generated_<id>/`:
+
+```
+app.manifest.yaml      # SOURCE OF TRUTH: intake, discovery, resource inventory
+                       #   (GET) + POST creation plan + blockers, style, refs to
+                       #   gold tables / genies / serving endpoints, and a
+                       #   files[] map (path, purpose, status, depends_on,
+                       #   produced_by_task)
+EXECUTION_PLAN.md      # agent-sized, ordered build-out plan for Claude Opus
+CONTRACTS.yaml         # interface/contracts the app must honor (AppConfig,
+                       #   UserAuth, DataAccess, Page, GenieClient)
+app.yaml               # Databricks Apps runtime spec (command: streamlit run app/app.py)
+README.md              # scaffold README (auth, scopes, system env)
+spec/                  # structured inputs copied as files
+  requirements.yaml  discovery_report.yaml
+  resource_inventory.yaml  resource_creation_plan.yaml
+app/                   # stub files with `# TODO(build-out):` + manifest cross-refs
+  config.py  auth.py  data_access.py  genie.py
+  pages/<page>.py ...  app.py
+requirements.txt
+```
+
+No model call is required, so local dev and tests always produce a valid,
+self-describing scaffold. (OmniAgent's multi-agent matrix, polyglot dependency
+normalization, and security-tooling machinery are intentionally dropped.)
+
+### Phase B — Claude Opus build-out via the AI Gateway
+
+`src/composer/llm/client.py::LLMClient.build_out_cascaron` reads
+`app.manifest.yaml` + `EXECUTION_PLAN.md` + `spec/`, then for each file whose
+manifest `status: to_generate` queries a **separate planner endpoint**
+(`PLANNER_MODEL_ENDPOINT`, default `databricks-claude-opus-4`), writes the
+generated contents, and flips the file's status to `generated`. It runs as the
+OBO user and attaches the `Databricks-Ai-Gateway-Request-Tags` header
+(`{"project":"databricks-app-business-builder","phase":"build-out"}`) for usage
+tracking / governance, per the
+[AI Gateway query-endpoints beta doc](https://docs.databricks.com/aws/en/ai-gateway/query-endpoints-beta).
+
+Phase B runs only when **connected** and a planner endpoint is available;
+otherwise it degrades gracefully and the scaffold stays valid with every file
+`to_generate`. `/run` surfaces which files were `generated` vs still
+`to_generate`, plus the manifest and execution-plan paths.
+
+### Generated-app conventions shaped by the Databricks Apps docs
+
+What the cascarón **emits** (and documents in the generated `README.md` /
+`app.manifest.yaml`) follows four Databricks Apps docs:
+
+- **[Auth](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth)** —
+  the generated app uses **user authorization (OBO)**, reading
+  `st.context.headers.get('x-forwarded-access-token')`; the manifest/README
+  document the required OAuth scopes (`sql`, `dashboards.genie`,
+  `serving.serving-endpoints`, `files.files`). App authorization
+  (`DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET`) is reserved for
+  shared/background actions. Tokens are never printed.
+- **[System env](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/system-env)** —
+  the app relies on platform-provided env vars (`DATABRICKS_HOST`,
+  `DATABRICKS_APP_PORT`, …) and never hardcodes them.
+- **[app.yaml runtime](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime)** —
+  a correct `app.yaml` is emitted (`command: ['streamlit','run','app/app.py']`,
+  `env:` entries such as the SQL warehouse id).
+- **[Node tutorial](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/tutorial-node)** —
+  used as a structural reference only; the default emitted stack stays
+  Streamlit/Python (a Node variant is optional/future).
 
 ## Repository structure
 

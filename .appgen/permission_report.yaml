@@ -1,8 +1,0 @@
-required_access: Los directores
-ok: false
-missing_capabilities:
-- read_catalog
-- comment_on
-- manage_genie
-- create_databricks_app
-- tag_resources

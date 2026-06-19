@@ -24,6 +24,11 @@ class Settings:
     mcp_server_url: str | None = None
     mcp_genie_space_ids: tuple[str, ...] = ()
     mcp_uc_schema: str | None = None
+    # Separate, overridable planner endpoint used for the Phase B build-out
+    # (Claude Opus by default). Kept distinct from the codegen endpoint above so
+    # the deterministic scaffold (Phase A) and the heavy build-out (Phase B) can
+    # target different models/governance scopes.
+    planner_model_endpoint: str = "databricks-claude-opus-4"
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -50,6 +55,9 @@ def load_settings() -> Settings:
         sp_client_secret=os.getenv("DBX_SP_CLIENT_SECRET"),
         foundation_model_endpoint=os.getenv(
             "FOUNDATION_MODEL_ENDPOINT", "databricks-claude-sonnet"
+        ),
+        planner_model_endpoint=os.getenv(
+            "PLANNER_MODEL_ENDPOINT", "databricks-claude-opus-4"
         ),
         preferred_model=os.getenv("PREFERRED_MODEL", "claude"),
         fallback_model=os.getenv("FALLBACK_MODEL", "databricks-gpt-fallback"),

@@ -82,6 +82,19 @@ class GeneratedArtifact:
     source: str = "template"
     generator_endpoint: str | None = None
     preview: str | None = None
+    # --- Two-phase cascarón (scaffold) metadata ---
+    # Phase A always emits a self-describing scaffold (manifest + plan +
+    # contracts + spec/ + app/ stubs). Phase B (Claude Opus) optionally fills
+    # the `to_generate` files when connected.
+    manifest_path: str | None = None
+    execution_plan_path: str | None = None
+    contracts_path: str | None = None
+    # Files still awaiting build-out vs. filled by Phase B.
+    files_to_generate: list[str] = field(default_factory=list)
+    files_built_out: list[str] = field(default_factory=list)
+    # "not_started" | "partial" | "complete"
+    build_out_phase: str = "not_started"
+    build_out_endpoint: str | None = None
 
 
 @dataclass(slots=True)

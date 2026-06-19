@@ -19,6 +19,9 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from pathlib import Path
+
+import yaml
 
 from composer.core.logging import log
 from composer.models.blueprint import AppBlueprint, BuildPlan, DiscoveryReport
@@ -31,6 +34,22 @@ _SYSTEM_PROMPT = (
     "contents (no prose, no markdown fences). Always include 'app.py'."
 )
 
+_BUILDOUT_SYSTEM_PROMPT = (
+    "You are Claude Opus implementing a Databricks Streamlit App from a "
+    "cascarón (scaffold). app.manifest.yaml is the source of truth and "
+    "CONTRACTS.yaml lists the interfaces you must honor. Implement EXACTLY the "
+    "single file you are asked for. The app uses user authorization (OBO): read "
+    "x-forwarded-access-token from request headers and never print/log tokens. "
+    "Respond with ONLY the raw file contents — no prose, no markdown fences."
+)
+
+# Default request tags attached to AI Gateway calls for usage tracking and
+# governance. See https://docs.databricks.com/aws/en/ai-gateway/query-endpoints-beta
+DEFAULT_REQUEST_TAGS = {
+    "project": "databricks-app-business-builder",
+    "phase": "build-out",
+}
+
 
 class LLMClient:
     def __init__(self, settings: object, workspace_client: object | None = None) -> None:
@@ -40,6 +59,11 @@ class LLMClient:
     @property
     def endpoint(self) -> str:
         return getattr(self.settings, "foundation_model_endpoint", "databricks-claude-sonnet")
+
+    @property
+    def planner_endpoint(self) -> str:
+        """Separate Opus-class endpoint for the Phase B build-out."""
+        return getattr(self.settings, "planner_model_endpoint", "databricks-claude-opus-4")
 
     @property
     def preferred_model(self) -> str:
@@ -96,6 +120,215 @@ class LLMClient:
         except Exception as exc:  # pragma: no cover - depends on live endpoint
             log.error("llm_codegen_failed", error=str(exc))
             return None
+
+    # -- Phase B: build-out the cascarón via the planner endpoint ----------
+
+    def build_out_cascaron(
+        self,
+        app_dir: str | Path,
+        *,
+        request_tags: dict | None = None,
+    ) -> dict:
+        """Fill the scaffold's ``to_generate`` files with Claude Opus.
+
+        Reads ``app.manifest.yaml`` (source of truth), ``EXECUTION_PLAN.md`` and
+        ``spec/`` from ``app_dir``, then for each file whose manifest
+        ``status == 'to_generate'`` queries the planner endpoint (Claude Opus,
+        via the Databricks AI Gateway, as the OBO user), writes the returned
+        contents and flips the manifest status to ``generated``.
+
+        Degrades gracefully: when no workspace client / planner endpoint is
+        available (or the manifest is missing), nothing is written and every
+        file stays ``to_generate`` — the scaffold remains valid and
+        self-describing.
+        """
+        base = Path(app_dir)
+        manifest_path = base / "app.manifest.yaml"
+        result: dict = {
+            "endpoint": self.planner_endpoint,
+            "generated": [],
+            "remaining": [],
+            "phase": "not_started",
+            "skipped": True,
+            "reason": None,
+        }
+        if not manifest_path.exists():
+            result["reason"] = "no_manifest"
+            return result
+        if self.workspace_client is None:
+            result["reason"] = "no_workspace_client"
+            result["remaining"] = self._manifest_to_generate(manifest_path)
+            return result
+        if not self.planner_endpoint:
+            result["reason"] = "no_planner_endpoint"
+            result["remaining"] = self._manifest_to_generate(manifest_path)
+            return result
+
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # pragma: no cover - corrupt manifest
+            log.error("buildout_manifest_unreadable", error=str(exc))
+            result["reason"] = "manifest_unreadable"
+            return result
+
+        plan_text = self._read_optional(base / "EXECUTION_PLAN.md")
+        contracts_text = self._read_optional(base / "CONTRACTS.yaml")
+        tags = request_tags or DEFAULT_REQUEST_TAGS
+
+        files = manifest.get("files") or []
+        result["skipped"] = False
+        for entry in files:
+            if not isinstance(entry, dict) or entry.get("status") != "to_generate":
+                continue
+            rel_path = entry.get("path")
+            if not isinstance(rel_path, str) or not rel_path.strip():
+                continue
+            prompt = self._build_buildout_prompt(
+                entry, manifest, plan_text, contracts_text
+            )
+            content = self._query_planner(prompt, request_tags=tags)
+            if not content:
+                result["remaining"].append(rel_path)
+                continue
+            if not self._write_buildout_file(base, rel_path, content):
+                result["remaining"].append(rel_path)
+                continue
+            entry["status"] = "generated"
+            result["generated"].append(rel_path)
+
+        result["phase"] = (
+            "complete"
+            if not result["remaining"]
+            else ("partial" if result["generated"] else "not_started")
+        )
+        manifest.setdefault("build_out", {})["phase"] = result["phase"]
+        try:
+            manifest_path.write_text(
+                yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # pragma: no cover - best effort
+            log.error("buildout_manifest_write_failed", error=str(exc))
+        log.info(
+            "llm_buildout_done",
+            endpoint=self.planner_endpoint,
+            generated=len(result["generated"]),
+            remaining=len(result["remaining"]),
+            phase=result["phase"],
+        )
+        return result
+
+    @staticmethod
+    def _manifest_to_generate(manifest_path: Path) -> list[str]:
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except Exception:  # pragma: no cover - best effort
+            return []
+        return [
+            e.get("path")
+            for e in (manifest.get("files") or [])
+            if isinstance(e, dict)
+            and e.get("status") == "to_generate"
+            and isinstance(e.get("path"), str)
+        ]
+
+    @staticmethod
+    def _read_optional(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _write_buildout_file(base: Path, rel_path: str, content: str) -> bool:
+        """Write a build-out file, refusing paths that escape ``base``."""
+        target = (base / rel_path).resolve()
+        base_resolved = base.resolve()
+        if base_resolved != target and base_resolved not in target.parents:
+            return False
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return True
+        except Exception as exc:  # pragma: no cover - best effort
+            log.error("buildout_write_failed", path=rel_path, error=str(exc))
+            return False
+
+    def _build_buildout_prompt(
+        self,
+        entry: dict,
+        manifest: dict,
+        plan_text: str,
+        contracts_text: str,
+    ) -> str:
+        intake = manifest.get("intake", {})
+        runtime = manifest.get("runtime", {})
+        dbx = runtime.get("databricks_apps", {})
+        return (
+            f"Implement this single file of the Databricks App: {entry.get('path')}\n"
+            f"Responsibility: {entry.get('purpose')}\n"
+            f"Depends on: {', '.join(entry.get('depends_on') or []) or '(none)'}\n"
+            f"Task id: {entry.get('produced_by_task')}\n\n"
+            f"Use case: {intake.get('primary_use_case_description')}\n"
+            f"Gold tables: {', '.join(intake.get('gold_tables') or []) or '(none)'}\n"
+            f"Genie spaces: {', '.join(manifest.get('references', {}).get('genie_spaces') or []) or '(none)'}\n"
+            f"Style: {intake.get('style_preferences')}\n\n"
+            f"Runtime: stack={runtime.get('stack')}, "
+            f"command={' '.join(runtime.get('command') or [])}\n"
+            f"Auth: {dbx.get('authorization')} via header "
+            f"{dbx.get('obo_header')}; OAuth scopes="
+            f"{', '.join(dbx.get('required_oauth_scopes') or [])}\n"
+            f"System env (read, do not hardcode): "
+            f"{', '.join(dbx.get('system_env') or [])}\n\n"
+            "Contracts to honor (CONTRACTS.yaml):\n"
+            f"{contracts_text}\n"
+            "Execution plan (EXECUTION_PLAN.md) excerpt for context follows; "
+            "implement ONLY the file named above.\n"
+            f"{plan_text[:4000]}\n"
+        )
+
+    def _query_planner(self, prompt: str, *, request_tags: dict | None = None) -> str | None:
+        """Query the planner endpoint via the AI Gateway with request tags.
+
+        Uses the OpenAI-compatible MLflow Chat Completions invocation and
+        attaches the ``Databricks-Ai-Gateway-Request-Tags`` header for usage
+        tracking / governance, running as the OBO user. See
+        https://docs.databricks.com/aws/en/ai-gateway/query-endpoints-beta
+
+        Returns the raw file contents, or ``None`` when the call fails or the
+        response is not a parseable chat-completions object (so the caller can
+        leave the file ``to_generate``).
+        """
+        body = {
+            "messages": [
+                {"role": "system", "content": _BUILDOUT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 4000,
+        }
+        headers = {}
+        if request_tags:
+            # Tags are passed as a JSON-encoded header value per the AI Gateway doc.
+            headers["Databricks-Ai-Gateway-Request-Tags"] = json.dumps(request_tags)
+        try:
+            api_client = self.workspace_client.api_client  # type: ignore[attr-defined]
+            response = api_client.do(
+                "POST",
+                f"/serving-endpoints/{self.planner_endpoint}/invocations",
+                body=body,
+                headers=headers,
+            )
+        except Exception as exc:  # pragma: no cover - depends on live endpoint
+            log.error("llm_buildout_query_failed", error=str(exc))
+            return None
+        # Real AI Gateway responses are JSON objects; anything else (e.g. a mock
+        # without a configured return) is treated as "no content" so we degrade.
+        if not isinstance(response, dict):
+            return None
+        text = self._extract_text(response)
+        cleaned = self._strip_fences(text)
+        return cleaned or None
 
     # -- internals --------------------------------------------------------
 
@@ -199,6 +432,17 @@ class LLMClient:
                 if msg.get("content"):
                     return msg["content"]
         return str(response)
+
+    @staticmethod
+    def _strip_fences(content: str) -> str:
+        """Strip leading/trailing markdown code fences from model output."""
+        if not content:
+            return ""
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z0-9_.-]*\n", "", text)
+            text = re.sub(r"\n```$", "", text)
+        return text.strip()
 
     @staticmethod
     def _parse_files(content: str) -> dict[str, str]:

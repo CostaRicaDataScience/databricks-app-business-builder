@@ -42,6 +42,9 @@ class AppSettings:
     mcp_server_url: str | None = None
     mcp_genie_space_ids: tuple[str, ...] = ()
     mcp_uc_schema: str | None = None
+    # Phase B build-out planner endpoint (Claude Opus by default), distinct from
+    # the codegen endpoint. Overridable via PLANNER_MODEL_ENDPOINT.
+    planner_model_endpoint: str = "databricks-claude-opus-4"
 
 
 def _parse_csv(value: str | None) -> tuple[str, ...]:
@@ -60,6 +63,9 @@ def load_settings(provider: ConfigProvider | None = None) -> AppSettings:
         service_principal_client_secret=cfg.get("DBX_SP_CLIENT_SECRET"),
         foundation_model_provider=cfg.get(
             "FOUNDATION_MODEL_PROVIDER", "databricks_foundation_model_apis"
+        ),
+        planner_model_endpoint=cfg.get(
+            "PLANNER_MODEL_ENDPOINT", "databricks-claude-opus-4"
         ),
         preferred_model=cfg.get("PREFERRED_MODEL", "claude"),
         fallback_model=cfg.get("FALLBACK_MODEL", "databricks-gpt-fallback"),

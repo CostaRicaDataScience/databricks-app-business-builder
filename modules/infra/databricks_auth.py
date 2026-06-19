@@ -39,6 +39,7 @@ def _to_composer_settings(settings: AppSettings) -> ComposerSettings:
         foundation_model_endpoint=os.getenv(
             "FOUNDATION_MODEL_ENDPOINT", "databricks-claude-sonnet"
         ),
+        planner_model_endpoint=settings.planner_model_endpoint,
         preferred_model=settings.preferred_model,
         fallback_model=settings.fallback_model,
         appgen_dir=os.getenv("APPGEN_DIR", ".appgen"),

@@ -1,2 +1,0 @@
-name: generated-app
-command: streamlit run app.py

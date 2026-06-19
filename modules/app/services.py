@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2] / "src"))
 
 from composer.blueprint.planner import build_blueprint
 from composer.blueprint.validate import validate_blueprint
+from composer.codegen.cascaron import emit_cascaron
 from composer.codegen.generator import generate_streamlit_app
 from composer.core.approvals import ApprovalGate
 from composer.core.artifacts import ArtifactStore
@@ -189,6 +190,7 @@ class OrchestratorService:
         plan_id: str,
         auth: RequestAuth | None = None,
         inventory: dict | None = None,
+        connected: bool | None = None,
     ) -> GeneratedArtifact:
         plan = self._require_plan(plan_id)
         intake = next(iter(self.intake_repo.list()), None)
@@ -202,10 +204,10 @@ class OrchestratorService:
         blueprint = build_blueprint(intake_spec, composer_discovery)
         validate_blueprint(blueprint)
         self.artifacts.save_dict("final_build_plan.yaml", blueprint.model_dump(mode="json"))
-        # Generate the app skeleton with the serving endpoint (as the OBO user
-        # when a forwarded token is present); fall back to the template offline.
-        # The resource inventory (GET results + POST plan) is fed to the model so
-        # the skeleton wires real resources and stubs the ones to be created.
+        # Generate the bootstrap entrypoint preview with the codegen serving
+        # endpoint (as the OBO user when a forwarded token is present); fall back
+        # to the template offline. The resource inventory (GET results + POST
+        # plan) is fed to the model so the preview wires real resources.
         llm = self._llm_client(auth)
         generated_files = llm.generate_app_source(
             intake_spec, blueprint, composer_discovery, inventory=inventory
@@ -215,26 +217,75 @@ class OrchestratorService:
             output_root=self.settings.output_root,
             files=generated_files,
         )
+        output_path = generated["output_path"]
+        # -- Phase A: deterministic cascarón (always; offline-safe) ---------
+        # Emits app.manifest.yaml (source of truth), EXECUTION_PLAN.md,
+        # CONTRACTS.yaml, spec/* and app/ stub files with TODO(build-out)
+        # markers. This is what the Phase B build-out LLM follows.
+        cascaron = emit_cascaron(
+            app_dir=output_path,
+            blueprint=blueprint,
+            intake=intake_spec,
+            discovery=composer_discovery,
+            inventory=inventory,
+            codegen_endpoint=llm.endpoint,
+            planner_endpoint=llm.planner_endpoint,
+        )
         # Always drop a RESOURCES.md so the skeleton documents the workspace
         # GET inventory and the POST plan, even in the offline template path.
+        extra_files = set(cascaron.get("scaffold_files") or [])
         if inventory is not None:
-            self._write_resources_doc(generated["output_path"], inventory)
-            generated["files_generated"] = sorted(
-                set(generated["files_generated"])
-                | {str(Path(generated["output_path"]) / "RESOURCES.md")}
-            )
+            self._write_resources_doc(output_path, inventory)
+            extra_files.add(str(Path(output_path) / "RESOURCES.md"))
+
+        # -- Phase B: Claude Opus build-out via the AI Gateway --------------
+        # Runs only when connected and a planner endpoint is available; otherwise
+        # the scaffold stays valid with all files `to_generate`.
+        if connected is None:
+            connected = self.connection.status(auth)["connected"]
+        build_out = {
+            "endpoint": llm.planner_endpoint,
+            "generated": [],
+            "remaining": list(cascaron.get("files_to_generate") or []),
+            "phase": "not_started",
+            "skipped": True,
+            "reason": "not_connected",
+        }
+        if connected and llm.planner_endpoint:
+            build_out = llm.build_out_cascaron(output_path)
+        files_built_out = list(build_out.get("generated") or [])
+
+        generated["files_generated"] = sorted(
+            set(generated["files_generated"]) | extra_files
+        )
         source = generated.get("source", "template")
         preview = _read_preview(generated.get("files_generated") or [])
         artifact = GeneratedArtifact(
             artifact_id=str(uuid.uuid4()),
-            output_path=generated["output_path"],
+            output_path=output_path,
             files_generated=generated["files_generated"],
             source=source,
             generator_endpoint=llm.endpoint if source == "llm" else None,
             preview=preview,
+            manifest_path=cascaron.get("manifest_path"),
+            execution_plan_path=cascaron.get("execution_plan_path"),
+            contracts_path=cascaron.get("contracts_path"),
+            files_to_generate=list(build_out.get("remaining") or []),
+            files_built_out=files_built_out,
+            build_out_phase=build_out.get("phase", "not_started"),
+            build_out_endpoint=build_out.get("endpoint"),
         )
         self.artifact_repo.save(artifact.artifact_id, artifact)
         self.artifacts.save_dict("generated_app_report.yaml", generated)
+        self.artifacts.save_dict(
+            "cascaron_buildout_report.yaml",
+            {
+                "manifest_path": cascaron.get("manifest_path"),
+                "execution_plan_path": cascaron.get("execution_plan_path"),
+                "contracts_path": cascaron.get("contracts_path"),
+                "build_out": build_out,
+            },
+        )
         return artifact
 
     @staticmethod
@@ -483,23 +534,29 @@ class OrchestratorService:
             }
         )
 
-        # Step 6 - build plan + generate app scaffold (with the inventory).
+        # Step 6 - build plan + generate cascarón scaffold (with the inventory).
         plan = self.build_plan(intake_id, dry_run=True, run_provisioning=False)
-        artifact = self.generate(plan.plan_id, auth, inventory=inventory)
-        if artifact.source == "llm":
+        artifact = self.generate(
+            plan.plan_id, auth, inventory=inventory, connected=auth_info["connected"]
+        )
+        n_built = len(artifact.files_built_out)
+        n_pending = len(artifact.files_to_generate)
+        if n_built:
             gen_detail = (
-                f"{len(artifact.files_generated)} archivo(s) generados por el modelo "
-                f"({artifact.generator_endpoint}) en {artifact.output_path}."
+                f"Esqueleto (cascarón) creado y {n_built} archivo(s) completados "
+                f"por Claude Opus ({artifact.build_out_endpoint}); "
+                f"{n_pending} pendiente(s) en {artifact.output_path}."
             )
         else:
             gen_detail = (
-                f"{len(artifact.files_generated)} archivo(s) creados con la plantilla "
-                f"base (sin conexión a un endpoint de modelo) en {artifact.output_path}."
+                f"Esqueleto (cascarón) creado con {n_pending} archivo(s) por "
+                f"construir (build-out de Opus pendiente de conexión) en "
+                f"{artifact.output_path}."
             )
         steps.append(
             {
                 "key": "generate",
-                "title": "Generamos el esqueleto de tu app",
+                "title": "Generamos el esqueleto (cascarón) de tu app",
                 "status": "done",
                 "detail": gen_detail,
             }
@@ -562,6 +619,16 @@ class OrchestratorService:
                 ),
                 "endpoint": artifact.generator_endpoint,
                 "preview": artifact.preview,
+                # Two-phase cascarón scaffold metadata.
+                "manifest_path": artifact.manifest_path,
+                "execution_plan_path": artifact.execution_plan_path,
+                "contracts_path": artifact.contracts_path,
+                "build_out": {
+                    "phase": artifact.build_out_phase,
+                    "endpoint": artifact.build_out_endpoint,
+                    "files_generated": artifact.files_built_out,
+                    "files_to_generate": artifact.files_to_generate,
+                },
             },
             "resources": inventory["resources"],
             "to_create": inventory["to_create"],
