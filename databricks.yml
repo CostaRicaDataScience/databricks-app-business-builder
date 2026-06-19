@@ -1,6 +1,13 @@
 bundle:
   name: databricks-app-business-builder
 
+resources:
+  apps:
+    business_builder:
+      name: databricks-app-business-builder
+      description: Composer + AppGen unified builder
+      source_code_path: .
+
 targets:
   dev:
     mode: development
