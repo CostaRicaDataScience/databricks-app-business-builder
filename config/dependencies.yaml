@@ -1,0 +1,22 @@
+version: 1
+dependencies:
+  - name: dspy-ai
+    version: '*'
+    source: https://github.com/stanfordnlp/dspy
+    license: MIT
+  - name: fastapi
+    version: ">=0.115"
+    license: MIT
+  - name: opentelemetry-sdk
+    version: '>=1.27'
+    source: https://github.com/open-telemetry/opentelemetry-python
+    license: Apache-2.0
+  - name: pydantic
+    version: ">=2.7"
+    license: MIT
+  - name: typer
+    version: ">=0.12"
+    license: MIT
+  - name: uvicorn
+    version: ">=0.30"
+    license: BSD-3-Clause

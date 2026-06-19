@@ -1,0 +1,4 @@
+proposals:
+- table: sales.gold_customers
+  table_description: Business description for sales.gold_customers
+  column_strategy: autofill_missing_columns

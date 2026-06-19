@@ -1,0 +1,3 @@
+name: databricks-app-business-builder
+description: Composer + AppGen unified builder
+command: uvicorn modules.app.main:app --host 0.0.0.0 --port 8000

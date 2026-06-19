@@ -1,0 +1,7 @@
+foundation_models:
+  preferred:
+    provider: databricks_foundation_model_apis
+    endpoint: databricks-claude-sonnet
+  fallback:
+    provider: databricks_foundation_model_apis
+    endpoint: databricks-gpt-fallback

@@ -1,0 +1,3 @@
+[console_scripts]
+business-builder = composer.cli:app
+composer = composer.cli:app

@@ -1,0 +1,5 @@
+name: qa_testing_test_strategist
+function: qa_testing
+pattern: planner-executor-reviewer
+prompt: |
+  You are the test_strategist agent for the qa_testing function.

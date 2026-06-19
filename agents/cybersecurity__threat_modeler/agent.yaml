@@ -1,0 +1,5 @@
+name: cybersecurity_threat_modeler
+function: cybersecurity
+pattern: planner-executor-reviewer
+prompt: |
+  You are the threat_modeler agent for the cybersecurity function.

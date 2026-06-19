@@ -1,0 +1,75 @@
+version: 1
+auth:
+  primary: jwt
+  options:
+    - id: jwt
+      name: JWT sessions (Authlib / PyJWT)
+      kind: token_auth
+      repo_url: https://github.com/lepture/authlib
+      license: BSD-3-Clause
+      primary: true
+      libs:
+        - stack: python_backend
+          package: authlib
+          version: '*'
+      why: matched signals ['api', 'backend']
+    - id: keycloak
+      name: Keycloak
+      kind: identity_provider
+      repo_url: https://github.com/keycloak/keycloak
+      license: Apache-2.0
+      primary: false
+      libs: []
+      why: alternative — matched []
+    - id: ory
+      name: Ory (Kratos + Hydra)
+      kind: identity_provider
+      repo_url: https://github.com/ory
+      license: Apache-2.0
+      primary: false
+      libs: []
+      why: alternative — matched []
+    - id: openfga
+      name: OpenFGA
+      kind: authorization
+      repo_url: https://github.com/openfga/openfga
+      license: Apache-2.0
+      primary: false
+      libs:
+        - stack: python_backend
+          package: openfga-sdk
+          version: '*'
+      why: authorization layer — matched []; pairs with the AuthN above
+tooling:
+  - id: gitleaks
+    name: Gitleaks
+    kind: secret_scanning
+    stage: ci
+    repo_url: https://github.com/gitleaks/gitleaks
+    license: MIT
+    license_flag: false
+    why: baseline — recommended for every project
+  - id: semgrep
+    name: Semgrep
+    kind: sast
+    stage: ci
+    repo_url: https://github.com/semgrep/semgrep
+    license: LGPL-2.1
+    license_flag: true
+    why: baseline — recommended for every project
+  - id: dependabot
+    name: Dependabot / Renovate
+    kind: dependency_updates
+    stage: ci
+    repo_url: https://github.com/renovatebot/renovate
+    license: AGPL-3.0
+    license_flag: true
+    why: baseline — recommended for every project
+  - id: husky
+    name: Husky + lint-staged
+    kind: git_hooks
+    stage: pre_commit
+    repo_url: https://github.com/typicode/husky
+    license: MIT
+    license_flag: false
+    why: matched signals ['frontend']

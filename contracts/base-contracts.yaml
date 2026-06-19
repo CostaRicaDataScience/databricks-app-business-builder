@@ -1,0 +1,77 @@
+# Base contracts: inter-module agreements the generated project must honor.
+# These are language-agnostic interface descriptions; the scaffold turns each
+# into a stub in the target language(s).
+
+version: 1
+
+contracts:
+  - name: "DiscoveryIntake"
+    module: "modules/domain"
+    description: "Captures product vision, stories, tables, genies, workflow, style, and access requirements."
+    operations:
+      - "validate(input) -> DiscoveryIntake"
+
+  - name: "BuildPlan"
+    module: "modules/domain"
+    description: "Structured implementation plan generated from intake and discovery."
+    operations:
+      - "create(intake, discovery_report) -> BuildPlan"
+
+  - name: "ProvisioningResult"
+    module: "modules/domain"
+    description: "Auditable provisioning result with actions, rollback hints, and tagging report."
+    operations:
+      - "record(actions_planned, actions_applied, rollback_hints, tagging_report) -> ProvisioningResult"
+
+  - name: "ConfigProvider"
+    module: "modules/core"
+    description: "Single source of typed configuration for all modules."
+    operations:
+      - "get(key: string) -> value"
+      - "require(key: string) -> value | raises MissingConfig"
+      - "get_bool(key: string, default: bool=false) -> bool"
+
+  - name: "Logger"
+    module: "modules/core"
+    description: "Structured logging facade."
+    operations:
+      - "info(event: string, **fields)"
+      - "error(event: string, **fields)"
+
+  - name: "Repository"
+    module: "modules/infra"
+    description: "Generic persistence boundary for domain entities."
+    operations:
+      - "get(id) -> Entity | None"
+      - "save(entity) -> Entity"
+      - "list(filter) -> Entity[]"
+
+  - name: "UseCase"
+    module: "modules/app"
+    description: "Application-layer entry point invoked by interfaces (CLI/UI/API)."
+    operations:
+      - "execute(input: Request) -> Response"
+
+  - name: "DatabricksApiClient"
+    module: "modules/infra"
+    description: "Gateway for Databricks workspace and resource operations."
+    operations:
+      - "check_capability(capability: string) -> bool"
+      - "get_table_metadata(table_name: string) -> TableMetadata | None"
+      - "enrich_table_metadata(table_name: string, table_description: string, column_descriptions: map) -> void"
+      - "genie_exists(genie_name: string) -> bool"
+      - "create_genie(genie_name: string, use_case_description: string) -> void"
+      - "create_databricks_app(app_name: string, output_path: string) -> string[]"
+
+  - name: "FoundationModelGateway"
+    module: "modules/app"
+    description: "Generates structured planning and scaffolding decisions using Foundation Model APIs."
+    operations:
+      - "build_plan(intake: DiscoveryIntake) -> BuildPlan"
+
+  - name: "AgentTool"
+    module: "agents"
+    description: "Contract a project subagent exposes to the supervisor."
+    operations:
+      - "invoke(task: Task) -> Result"
+      - "describe() -> ToolSchema"

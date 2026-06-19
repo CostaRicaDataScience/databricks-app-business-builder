@@ -1,0 +1,5 @@
+name: platform_devops_ci_cd
+function: platform_devops
+pattern: loop
+prompt: |
+  You are the ci_cd agent for the platform_devops function.

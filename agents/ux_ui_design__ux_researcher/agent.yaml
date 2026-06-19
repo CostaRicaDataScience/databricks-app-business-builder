@@ -1,0 +1,5 @@
+name: ux_ui_design_ux_researcher
+function: ux_ui_design
+pattern: planner-executor-reviewer
+prompt: |
+  You are the ux_researcher agent for the ux_ui_design function.

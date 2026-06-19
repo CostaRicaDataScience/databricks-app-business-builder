@@ -1,0 +1,5 @@
+name: core_engineering_module_builder
+function: core_engineering
+pattern: planner-executor-reviewer
+prompt: |
+  You are the module_builder agent for the core_engineering function.

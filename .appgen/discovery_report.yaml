@@ -1,0 +1,16 @@
+report_id: 8f206d18-763d-4e85-8833-f92b53080147
+tables:
+- name: sales.gold_orders
+  status: exists
+  details: null
+- name: sales.gold_customers
+  status: needs_enrichment
+  details: Missing column comments
+genies:
+- name: sales_assistant
+  status: exists
+  details: null
+- name: new_sales_genie
+  status: needs_creation
+  details: Requested genie does not exist
+summary: Discovery report generated.

@@ -1,0 +1,5 @@
+name: ux_ui_design_design_system
+function: ux_ui_design
+pattern: loop
+prompt: |
+  You are the design_system agent for the ux_ui_design function.

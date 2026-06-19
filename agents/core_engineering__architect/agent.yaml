@@ -1,0 +1,5 @@
+name: core_engineering_architect
+function: core_engineering
+pattern: router+specialists
+prompt: |
+  You are the architect agent for the core_engineering function.

@@ -1,0 +1,5 @@
+name: core_engineering_integration
+function: core_engineering
+pattern: loop
+prompt: |
+  You are the integration agent for the core_engineering function.

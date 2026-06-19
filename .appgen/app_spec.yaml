@@ -1,0 +1,8 @@
+plan_id: c79a01a6-6835-4f38-8461-e90262df69a8
+summary: Generated with endpoint=databricks_foundation_model_apis preferred_model=claude
+implementation_steps:
+- Validate intake completeness and access requirements
+- Discover gold tables and genie assets
+- Fill metadata gaps with approval gates
+- Generate AppBlueprint and Streamlit app
+- Run preflight checks and deploy with tags

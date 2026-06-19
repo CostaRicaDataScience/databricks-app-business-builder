@@ -1,0 +1,5 @@
+name: cybersecurity_supply_chain_auditor
+function: cybersecurity
+pattern: event-driven
+prompt: |
+  You are the supply_chain_auditor agent for the cybersecurity function.

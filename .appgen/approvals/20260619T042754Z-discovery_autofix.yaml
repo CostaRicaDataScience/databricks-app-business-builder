@@ -1,0 +1,4 @@
+action: discovery_autofix
+approved: true
+dry_run: true
+reason: null

@@ -1,0 +1,5 @@
+name: platform_devops_observability
+function: platform_devops
+pattern: event-driven
+prompt: |
+  You are the observability agent for the platform_devops function.

@@ -1,0 +1,14 @@
+primary_use_case_description: Build sales KPI assistant app
+user_stories:
+- As analyst I want to review monthly sales
+- As manager I want to query anomalies
+gold_tables:
+- sales.gold_orders
+- sales.gold_customers
+existing_genies:
+- sales_assistant
+- new_sales_genie
+workflow_requirements: Daily refresh and weekly review
+style_preferences: Clean dashboard with dark accents
+access_requirements: Read UC + create genie + app create
+style_reference: null

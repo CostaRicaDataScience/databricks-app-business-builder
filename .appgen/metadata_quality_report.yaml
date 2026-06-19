@@ -1,0 +1,3 @@
+tables_missing_metadata:
+- sales.gold_customers
+table_count: 2

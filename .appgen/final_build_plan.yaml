@@ -1,0 +1,10 @@
+blueprint_id: af7287e2-6962-4157-96ff-a322bba8a413
+pages:
+- home
+- insights
+- genie_assistant
+stories_traceability:
+  story_1:
+  - Como analista quiero ver KPIs
+style_tokens:
+  theme: Tema oscuro, simple.

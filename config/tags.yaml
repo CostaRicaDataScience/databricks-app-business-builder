@@ -1,0 +1,9 @@
+required_tags:
+  - project
+  - environment
+  - owner
+  - use_case
+  - trace_id
+
+defaults:
+  project: databricks-app-business-builder
