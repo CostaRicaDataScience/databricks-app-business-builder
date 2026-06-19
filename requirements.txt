@@ -5,4 +5,6 @@ pyyaml>=6.0
 typer>=0.12
 jinja2>=3.1
 databricks-sdk>=0.57.0
-mcp>=1.2
+# Optional: enables Managed MCP discovery (only when MCP_SERVER_URL is set).
+# Kept optional so a transient install failure can't break the core deploy.
+# mcp>=1.2

@@ -23,6 +23,9 @@ class DatabricksClient:
     # only on the live ``workspace_client`` and never stored/logged here.
     auth_mode_override: str | None = None
     principal_override: str | None = None
+    # Sanitized reason the per-request/SDK client could not be built (never the
+    # token). Surfaced in connection_status so failures are diagnosable.
+    init_error: str | None = None
 
     @classmethod
     def for_request(cls, settings: Settings, auth: RequestAuth) -> "DatabricksClient":
@@ -41,10 +44,19 @@ class DatabricksClient:
                 workspace_client=None,
                 auth_mode_override=MODE_OBO,
                 principal_override=auth.principal,
+                init_error="databricks-sdk is not installed in this runtime",
             )
         try:
             # Per-request client scoped to the user's forwarded OAuth token.
-            client = WorkspaceClient(host=host, token=auth.user_token)
+            # ``auth_type="pat"`` is REQUIRED inside Databricks Apps: the runtime
+            # already exports the app service principal's OAuth env vars
+            # (DATABRICKS_CLIENT_ID/SECRET). Without pinning the auth type, the
+            # SDK sees both the env OAuth creds and this token and aborts with
+            # "more than one authorization method configured". Pinning to PAT
+            # makes it use *only* the forwarded user token (true OBO).
+            client = WorkspaceClient(
+                host=host, token=auth.user_token, auth_type="pat"
+            )
             return cls(
                 settings=replace(settings, databricks_host=host),
                 workspace_client=client,
@@ -58,6 +70,7 @@ class DatabricksClient:
                 workspace_client=None,
                 auth_mode_override=MODE_OBO,
                 principal_override=auth.principal,
+                init_error=str(exc),
             )
 
     @classmethod
@@ -230,10 +243,17 @@ class DatabricksClient:
         # mock environments we report what is missing instead of failing hard.
         if self.workspace_client is None:
             if self.auth_mode_override == MODE_OBO:
-                message = (
-                    "Received a forwarded user token (OBO), but the Databricks "
-                    "SDK is unavailable to initialize a per-request client."
-                )
+                if self.init_error:
+                    message = (
+                        "Received a forwarded user token (OBO) but could not "
+                        f"initialize a per-request client: {self.init_error}"
+                    )
+                else:
+                    message = (
+                        "Received a forwarded user token (OBO), but the "
+                        "Databricks SDK is unavailable to initialize a "
+                        "per-request client."
+                    )
             elif WorkspaceClient is None:
                 message = "Databricks SDK not available; running in mock mode."
             elif missing:

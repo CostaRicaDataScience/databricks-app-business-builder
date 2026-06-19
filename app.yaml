@@ -1,6 +1,12 @@
-name: databricks-app-business-builder
-description: Composer + AppGen unified builder
-command: uvicorn modules.app.main:app --host 0.0.0.0 --port 8000
+# Databricks Apps entry point. NOTE: top-level `name`/`description` are NOT valid
+# here (they live on the App resource / UI). `command` must be a YAML sequence.
+command:
+  - uvicorn
+  - modules.app.main:app
+  - --host
+  - "0.0.0.0"
+  - --port
+  - "8000"
 
 # --- Databricks Apps: enable OBO (on-behalf-of-user) ---
 # To make per-request user auth work, this app must be deployed with *user
