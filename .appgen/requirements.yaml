@@ -1,14 +1,12 @@
-primary_use_case_description: Build sales KPI assistant app
+primary_use_case_description: App para el director de la universidad
 user_stories:
-- As analyst I want to review monthly sales
-- As manager I want to query anomalies
+- Presentar informacion sobre investigacion y estudiantes
 gold_tables:
-- sales.gold_orders
-- sales.gold_customers
+- serverless_stable_ys5bgd_catalog.puc.gold_estudiante_360_genie
+- serverless_stable_ys5bgd_catalog.puc.gold_research_acceleration_cockpit
 existing_genies:
-- sales_assistant
-- new_sales_genie
-workflow_requirements: Daily refresh and weekly review
-style_preferences: Clean dashboard with dark accents
-access_requirements: Read UC + create genie + app create
+- No estoy seguro, quiero que busques.
+workflow_requirements: Todas las noches
+style_preferences: Glass estilo iPhone 2026
+access_requirements: Los directores
 style_reference: null

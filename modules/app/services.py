@@ -14,8 +14,11 @@ from composer.blueprint.validate import validate_blueprint
 from composer.codegen.generator import generate_streamlit_app
 from composer.core.approvals import ApprovalGate
 from composer.core.artifacts import ArtifactStore
+from composer.databricks.inventory import collect_inventory
+from composer.databricks.obo import RequestAuth
 from composer.discovery.service import DiscoveryService
 from composer.llm.client import LLMClient
+from composer.mcp.client import MCPClient
 from composer.metadata.audit import build_metadata_quality_report
 from composer.metadata.enrich import propose_metadata_updates
 from composer.metadata.writer import apply_metadata_updates
@@ -98,9 +101,31 @@ class OrchestratorService:
         log.info("discovery_intake_submitted", intake_id=intake_id)
         return intake_id
 
-    def run_discovery(self, intake_id: str) -> DiscoveryReport:
+    def _mcp_client(self, auth: RequestAuth | None = None) -> MCPClient:
+        settings = self.connection.composer_settings
+        token = (
+            auth.user_token
+            if (auth is not None and auth.is_obo)
+            else settings.databricks_token
+        )
+        return MCPClient.from_settings(settings, token=token)
+
+    def _llm_client(self, auth: RequestAuth | None = None) -> LLMClient:
+        workspace_client = self.connection.workspace_client(auth)
+        return LLMClient(
+            self.connection.composer_settings, workspace_client=workspace_client
+        )
+
+    def run_discovery(self, intake_id: str, auth: RequestAuth | None = None) -> DiscoveryReport:
         intake = self._require_intake(intake_id)
-        composer_report = DiscoveryService().run(_to_intake_spec(intake))
+        # Only use the live workspace for real verification when we are actually
+        # connected (authenticated). Otherwise stay honest and report unknown.
+        connected = self.connection.status(auth)["connected"]
+        workspace = self.connection.databricks_client(auth) if connected else None
+        composer_report = DiscoveryService(
+            mcp_client=self._mcp_client(auth),
+            workspace=workspace,
+        ).run(_to_intake_spec(intake))
         report = _from_composer_discovery(composer_report)
         self.discovery_repo.save(report.report_id, report)
         self.artifacts.save_dict("discovery_report.yaml", composer_report.model_dump(mode="json"))
@@ -159,7 +184,12 @@ class OrchestratorService:
         self.artifacts.save_dict("app_spec.yaml", asdict(plan))
         return plan
 
-    def generate(self, plan_id: str) -> GeneratedArtifact:
+    def generate(
+        self,
+        plan_id: str,
+        auth: RequestAuth | None = None,
+        inventory: dict | None = None,
+    ) -> GeneratedArtifact:
         plan = self._require_plan(plan_id)
         intake = next(iter(self.intake_repo.list()), None)
         if intake is None:
@@ -167,18 +197,74 @@ class OrchestratorService:
         discovery = next(iter(self.discovery_repo.list()), None)
         if discovery is None:
             raise ValueError("No discovery report found to generate blueprint")
-        blueprint = build_blueprint(_to_intake_spec(intake), _to_composer_discovery(discovery))
+        intake_spec = _to_intake_spec(intake)
+        composer_discovery = _to_composer_discovery(discovery)
+        blueprint = build_blueprint(intake_spec, composer_discovery)
         validate_blueprint(blueprint)
         self.artifacts.save_dict("final_build_plan.yaml", blueprint.model_dump(mode="json"))
-        generated = generate_streamlit_app(blueprint, output_root=self.settings.output_root)
+        # Generate the app skeleton with the serving endpoint (as the OBO user
+        # when a forwarded token is present); fall back to the template offline.
+        # The resource inventory (GET results + POST plan) is fed to the model so
+        # the skeleton wires real resources and stubs the ones to be created.
+        llm = self._llm_client(auth)
+        generated_files = llm.generate_app_source(
+            intake_spec, blueprint, composer_discovery, inventory=inventory
+        )
+        generated = generate_streamlit_app(
+            blueprint,
+            output_root=self.settings.output_root,
+            files=generated_files,
+        )
+        # Always drop a RESOURCES.md so the skeleton documents the workspace
+        # GET inventory and the POST plan, even in the offline template path.
+        if inventory is not None:
+            self._write_resources_doc(generated["output_path"], inventory)
+            generated["files_generated"] = sorted(
+                set(generated["files_generated"])
+                | {str(Path(generated["output_path"]) / "RESOURCES.md")}
+            )
+        source = generated.get("source", "template")
+        preview = _read_preview(generated.get("files_generated") or [])
         artifact = GeneratedArtifact(
             artifact_id=str(uuid.uuid4()),
             output_path=generated["output_path"],
             files_generated=generated["files_generated"],
+            source=source,
+            generator_endpoint=llm.endpoint if source == "llm" else None,
+            preview=preview,
         )
         self.artifact_repo.save(artifact.artifact_id, artifact)
         self.artifacts.save_dict("generated_app_report.yaml", generated)
         return artifact
+
+    @staticmethod
+    def _write_resources_doc(output_path: str, inventory: dict) -> None:
+        """Write RESOURCES.md summarizing GET inventory and the POST plan."""
+        lines = ["# Workspace resources", ""]
+        lines.append("## Existing (GET)")
+        for key, info in (inventory.get("resources") or {}).items():
+            mark = "checked" if info.get("checked") else "not verified"
+            existing = ", ".join(info.get("existing") or []) or "—"
+            lines.append(f"- **{key}** ({mark}): {existing}")
+        lines.append("")
+        lines.append("## To create (POST)")
+        for item in inventory.get("to_create") or []:
+            lines.append(
+                f"- **{item.get('resource_type')}** `{item.get('name')}`"
+                f" — {item.get('reason')}"
+            )
+        blockers = inventory.get("blockers") or []
+        if blockers:
+            lines.append("")
+            lines.append("## Blockers")
+            for b in blockers:
+                lines.append(f"- {b}")
+        try:
+            (Path(output_path) / "RESOURCES.md").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
+        except Exception:  # pragma: no cover - best effort
+            pass
 
     def provision(
         self,
@@ -249,18 +335,22 @@ class OrchestratorService:
         )
         return result
 
-    def auth_status(self) -> dict:
-        """Connection + permission status for the Databricks workspace."""
-        return self.connection.status()
+    def auth_status(self, auth: RequestAuth | None = None) -> dict:
+        """Connection + permission status for the Databricks workspace.
 
-    def connect(self) -> dict:
+        When a forwarded OBO user token is present, status reflects the
+        signed-in user and reports ``auth_mode='databricks_app_obo'``.
+        """
+        return self.connection.status(auth)
+
+    def connect(self, auth: RequestAuth | None = None) -> dict:
         """Attempt to (re)resolve the workspace connection and report status.
 
         With the SDK this re-runs client resolution (host+token, profile, or
         service principal). It returns the same shape as ``auth_status`` so the
         UI can show connected/principal/host or exactly what is missing.
         """
-        status = self.connection.status()
+        status = self.connection.status(auth)
         log.info(
             "databricks_connect_attempt",
             connected=status["connected"],
@@ -269,7 +359,7 @@ class OrchestratorService:
         )
         return status
 
-    def run_pipeline(self, intake: DiscoveryIntake) -> dict:
+    def run_pipeline(self, intake: DiscoveryIntake, auth: RequestAuth | None = None) -> dict:
         """Run the full intake -> discovery -> autofix -> plan -> generate flow.
 
         Returns a human-friendly summary. Safe fixes (metadata enrichment) are
@@ -286,24 +376,27 @@ class OrchestratorService:
         )
 
         # Step 2 - connection + permission preview (the moment we connect).
-        auth = self.auth_status()
-        capabilities = {p["key"]: p["satisfied"] for p in auth["permissions"]}
+        auth_info = self.auth_status(auth)
+        capabilities = {p["key"]: p["satisfied"] for p in auth_info["permissions"]}
         steps.append(
             {
                 "key": "connect",
                 "title": "Conexión a Databricks y permisos",
-                "status": "done" if auth["connected"] else "needs_attention",
-                "detail": auth["message"],
+                "status": "done" if auth_info["connected"] else "needs_attention",
+                "detail": auth_info["message"],
             }
         )
 
         # Step 3 - discovery of tables and genies.
-        report = self.run_discovery(intake_id)
+        report = self.run_discovery(intake_id, auth)
         tables_ok = [t.table_name for t in report.tables if t.status == DiscoveryStatus.EXISTS]
         tables_to_fix = [
             t.table_name
             for t in report.tables
             if t.status in {DiscoveryStatus.MISSING, DiscoveryStatus.NEEDS_ENRICHMENT}
+        ]
+        tables_unverified = [
+            t.table_name for t in report.tables if t.status == DiscoveryStatus.UNKNOWN
         ]
         genies_existing = [
             g.genie_name for g in report.genies if g.status == DiscoveryStatus.EXISTS
@@ -313,12 +406,22 @@ class OrchestratorService:
             for g in report.genies
             if g.status == DiscoveryStatus.NEEDS_CREATION
         ]
+        genies_unverified = [
+            g.genie_name for g in report.genies if g.status == DiscoveryStatus.UNKNOWN
+        ]
+        discovery_detail = (
+            f"{len(report.tables)} tabla(s) y {len(report.genies)} asistente(s) revisados."
+        )
+        if tables_unverified:
+            discovery_detail += (
+                f" {len(tables_unverified)} sin verificar (requiere conexión)."
+            )
         steps.append(
             {
                 "key": "discovery",
                 "title": "Revisamos tus datos y asistentes",
-                "status": "done",
-                "detail": f"{len(report.tables)} tablas y {len(report.genies)} asistentes revisados.",
+                "status": "needs_attention" if tables_unverified else "done",
+                "detail": discovery_detail,
             }
         )
 
@@ -354,15 +457,51 @@ class OrchestratorService:
             }
         )
 
-        # Step 5 - build plan + generate app scaffold.
+        # Step 5 - inventory: GET existing workspace resources, map POSTs to make.
+        inventory = collect_inventory(
+            client=self.connection.databricks_client(auth),
+            intake=_to_intake_spec(intake),
+            discovery=_to_composer_discovery(report),
+            serving_endpoint=self.connection.composer_settings.foundation_model_endpoint,
+            connected=auth_info["connected"],
+        )
+        self.artifacts.save_dict("resource_inventory.yaml", inventory["resources"])
+        self.artifacts.save_dict(
+            "resource_creation_plan.yaml",
+            {"to_create": inventory["to_create"], "blockers": inventory["blockers"]},
+        )
+        steps.append(
+            {
+                "key": "resources",
+                "title": "Revisamos los recursos de tu workspace",
+                "status": "done" if inventory["checked"] else "needs_attention",
+                "detail": (
+                    f"{len(inventory['to_create'])} recurso(s) por crear."
+                    if inventory["checked"]
+                    else "Inventario pendiente: conéctate para verificar recursos existentes."
+                ),
+            }
+        )
+
+        # Step 6 - build plan + generate app scaffold (with the inventory).
         plan = self.build_plan(intake_id, dry_run=True, run_provisioning=False)
-        artifact = self.generate(plan.plan_id)
+        artifact = self.generate(plan.plan_id, auth, inventory=inventory)
+        if artifact.source == "llm":
+            gen_detail = (
+                f"{len(artifact.files_generated)} archivo(s) generados por el modelo "
+                f"({artifact.generator_endpoint}) en {artifact.output_path}."
+            )
+        else:
+            gen_detail = (
+                f"{len(artifact.files_generated)} archivo(s) creados con la plantilla "
+                f"base (sin conexión a un endpoint de modelo) en {artifact.output_path}."
+            )
         steps.append(
             {
                 "key": "generate",
                 "title": "Generamos el esqueleto de tu app",
                 "status": "done",
-                "detail": f"{len(artifact.files_generated)} archivo(s) en {artifact.output_path}.",
+                "detail": gen_detail,
             }
         )
 
@@ -384,11 +523,11 @@ class OrchestratorService:
             "Revisa los datos encontrados y las descripciones mejoradas.",
             "Aprueba la creación de asistentes y la publicación cuando estés listo.",
         ]
-        if auth["missing"]:
+        if auth_info["missing"]:
             next_actions.insert(
                 0,
                 "Configura el acceso a Databricks: faltan "
-                + ", ".join(auth["missing"])
+                + ", ".join(auth_info["missing"])
                 + ".",
             )
 
@@ -396,25 +535,38 @@ class OrchestratorService:
             "headline": "Listo: ejecutamos el flujo completo con tus requerimientos.",
             "steps": steps,
             "connection": {
-                "connected": auth["connected"],
-                "host": auth["host"],
-                "principal": auth["principal"],
-                "auth_mode": auth["auth_mode"],
-                "message": auth["message"],
+                "connected": auth_info["connected"],
+                "host": auth_info["host"],
+                "principal": auth_info["principal"],
+                "auth_mode": auth_info["auth_mode"],
+                "message": auth_info["message"],
             },
             "data": {
                 "tables_found": tables_ok,
                 "tables_improved": tables_to_fix,
+                "tables_unverified": tables_unverified,
             },
             "assistants": {
                 "existing": genies_existing,
                 "to_create": genies_to_create,
+                "unverified": genies_unverified,
             },
             "generated_app": {
                 "output_path": artifact.output_path,
                 "files": artifact.files_generated,
+                "source": artifact.source,
+                "generated_by": (
+                    f"modelo · {artifact.generator_endpoint}"
+                    if artifact.source == "llm"
+                    else "plantilla base (sin conexión a un modelo)"
+                ),
+                "endpoint": artifact.generator_endpoint,
+                "preview": artifact.preview,
             },
-            "permissions": auth["permissions"],
+            "resources": inventory["resources"],
+            "to_create": inventory["to_create"],
+            "blockers": inventory["blockers"],
+            "permissions": auth_info["permissions"],
             "preflight_ok": preflight["ok"],
             "requires_approval": requires_approval,
             "next_actions": next_actions,
@@ -428,7 +580,7 @@ class OrchestratorService:
         self.operation_repo.save(
             intake_id, {"type": "run_pipeline", "summary": summary}
         )
-        log.info("run_pipeline_completed", intake_id=intake_id, connected=auth["connected"])
+        log.info("run_pipeline_completed", intake_id=intake_id, connected=auth_info["connected"])
         return summary
 
     def get_discovery_report(self, report_id: str) -> DiscoveryReport:
@@ -463,6 +615,23 @@ class OrchestratorService:
         if plan is None:
             raise ValueError(f"Unknown plan_id: {plan_id}")
         return plan
+
+
+def _read_preview(files_generated: list[str], limit: int = 600) -> str | None:
+    """Return a short preview of the generated app's entrypoint (app.py).
+
+    Best-effort and never raises; used only to show the user a glimpse of the
+    generated skeleton in the result panel.
+    """
+    app_py = next((p for p in files_generated if p.endswith("app.py")), None)
+    target = app_py or (files_generated[0] if files_generated else None)
+    if not target:
+        return None
+    try:
+        text = Path(target).read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _to_intake_spec(intake: DiscoveryIntake) -> IntakeSpec:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from modules.app.schemas import (
@@ -25,6 +25,11 @@ from modules.infra.auth import AuthProvider
 from modules.infra.databricks_client import DatabricksApiClient
 from modules.infra.tagging import TaggingPolicy
 
+# composer.* is importable because modules.app.services puts ``src`` on sys.path
+# at import time (above). The OBO resolver reads Databricks Apps forwarded
+# headers to build a per-request, on-behalf-of-user auth context.
+from composer.databricks.obo import RequestAuth, resolve_request_auth
+
 app = FastAPI(title='Databricks App business builder')
 settings = load_settings()
 auth_provider = AuthProvider(settings)
@@ -38,6 +43,19 @@ orchestrator = OrchestratorService(
     genai_gateway=genai_gateway,
     tagging_policy=tagging_policy,
 )
+
+
+def _request_auth(request: Request) -> RequestAuth:
+    """Resolve per-request auth from Databricks Apps forwarded headers.
+
+    Falls back to the configured auth mode/host when no forwarded user token is
+    present (local dev / not deployed as an App).
+    """
+    return resolve_request_auth(
+        request.headers,
+        fallback_mode=settings.auth_mode,
+        fallback_host=settings.databricks_host,
+    )
 
 
 @app.get('/health')
@@ -57,22 +75,28 @@ def home() -> str:
 
 
 @app.get('/auth/status')
-def auth_status() -> dict:
-    """Report Databricks connection + the permissions we will request."""
-    return orchestrator.auth_status()
+def auth_status(request: Request) -> dict:
+    """Report Databricks connection + the permissions we will request.
+
+    Honors Databricks Apps OBO: when ``X-Forwarded-Access-Token`` is present,
+    status reflects the signed-in user (``auth_mode='databricks_app_obo'``).
+    """
+    return orchestrator.auth_status(_request_auth(request))
 
 
 @app.post('/auth/connect')
-def auth_connect() -> dict:
+def auth_connect(request: Request) -> dict:
     """Attempt to connect to the Databricks workspace and report the result."""
-    return orchestrator.connect()
+    return orchestrator.connect(_request_auth(request))
 
 
 @app.post('/run')
-def run_pipeline(payload: RunPipelineRequest) -> dict:
+def run_pipeline(payload: RunPipelineRequest, request: Request) -> dict:
     """Single entrypoint: run intake -> discovery -> autofix -> plan -> generate.
 
-    Returns a human-friendly summary; granular endpoints remain for power users.
+    Runs as the signed-in user (OBO) when a forwarded token is present, so
+    discovery/Genie/codegen use that user's real permissions. Returns a
+    human-friendly summary; granular endpoints remain for power users.
     """
     style_reference = _to_style_reference(payload.style_reference)
     intake = DiscoveryIntake(
@@ -86,7 +110,7 @@ def run_pipeline(payload: RunPipelineRequest) -> dict:
         style_reference=style_reference,
     )
     try:
-        return orchestrator.run_pipeline(intake)
+        return orchestrator.run_pipeline(intake, _request_auth(request))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -361,7 +385,8 @@ _HOME_HTML = r"""
               <div class="hint">Si no estás seguro del nombre exacto, escribe el que conozcas.</div>
 
               <label for="genies">¿Ya existe un asistente de datos que quieras reutilizar? (opcional)</label>
-              <textarea id="genies" placeholder="Un asistente (Genie) por línea. Déjalo vacío si no aplica."></textarea>
+              <textarea id="genies" placeholder='Escribe su nombre, o "no estoy seguro, busca" y lo buscamos por ti.'></textarea>
+              <div class="hint">Si no lo conoces, pídenos que busquemos: revisaremos los asistentes de tu workspace.</div>
 
               <label for="workflow">¿Con qué frecuencia se actualizan los datos y quién aprueba los cambios?</label>
               <textarea id="workflow" required placeholder='Ej: "Se actualiza cada día; mi líder aprueba cambios grandes."'></textarea>
@@ -514,16 +539,58 @@ _HOME_HTML = r"""
       html += '<div class="section-title">Datos</div>';
       html += '<div class="kv">Encontradas: ' + chips(d.tables_found) + "</div>";
       html += '<div class="kv" style="margin-top:6px;">Mejoradas automáticamente: ' + chips(d.tables_improved) + "</div>";
+      if (d.tables_unverified && d.tables_unverified.length) {
+        html += '<div class="kv" style="margin-top:6px;">Sin verificar (requiere conexión): ' +
+          chips(d.tables_unverified, "approve") + "</div>";
+      }
 
       var a = s.assistants || {};
       html += '<div class="section-title">Asistentes (Genies)</div>';
-      html += '<div class="kv">Reutilizados: ' + chips(a.existing) + "</div>";
+      html += '<div class="kv">Reutilizados / encontrados: ' + chips(a.existing) + "</div>";
       html += '<div class="kv" style="margin-top:6px;">Por crear: ' + chips(a.to_create, "approve") + "</div>";
+      if (a.unverified && a.unverified.length) {
+        html += '<div class="kv" style="margin-top:6px;">No se pudo buscar (requiere conexión): ' +
+          chips(a.unverified, "approve") + "</div>";
+      }
 
       var g = s.generated_app || {};
       html += '<div class="section-title">App generada</div>';
-      html += '<div class="kv"><b>Carpeta:</b> ' + esc(g.output_path) + " · " +
+      html += '<div class="kv"><b>Generada por:</b> ' + esc(g.generated_by || "—") + "</div>";
+      html += '<div class="kv" style="margin-top:4px;"><b>Carpeta:</b> ' + esc(g.output_path) + " · " +
         ((g.files || []).length) + " archivo(s)</div>";
+      if (g.preview) {
+        html += '<details class="tech" style="margin-top:8px;"><summary>Ver vista previa del código (app.py)</summary><pre>' +
+          esc(g.preview) + "</pre></details>";
+      }
+
+      var resMap = s.resources || {};
+      var resKeys = Object.keys(resMap);
+      if (resKeys.length) {
+        html += '<div class="section-title">Recursos del workspace (GET)</div><div class="kv">';
+        resKeys.forEach(function (k) {
+          var info = resMap[k] || {};
+          var ex = (info.existing && info.existing.length) ? info.existing.join(", ") : "—";
+          var mark = info.checked ? "" : " (sin verificar)";
+          html += "<div><b>" + esc(k) + "</b>" + esc(mark) + ": " + esc(ex) + "</div>";
+        });
+        html += "</div>";
+      }
+
+      if (s.to_create && s.to_create.length) {
+        html += '<div class="section-title">Por crear (POST)</div><div class="kv">';
+        s.to_create.forEach(function (it) {
+          var v = it.verified ? "" : " · pendiente de verificar";
+          html += "<div>➕ <b>" + esc(it.resource_type) + "</b> " + esc(it.name) +
+            " — " + esc(it.reason) + esc(v) + "</div>";
+        });
+        html += "</div>";
+      }
+
+      if (s.blockers && s.blockers.length) {
+        html += '<div class="section-title">Bloqueos</div><div class="kv">';
+        html += s.blockers.map(function (x) { return "⛔ " + esc(x); }).join("<br/>");
+        html += "</div>";
+      }
 
       html += '<div class="section-title">Permisos solicitados</div><div class="list">';
       (s.permissions || []).forEach(function (p) {

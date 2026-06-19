@@ -38,6 +38,16 @@ class AppSettings:
     preferred_model: str
     fallback_model: str
     output_root: str
+    # MCP integration (disabled by default).
+    mcp_server_url: str | None = None
+    mcp_genie_space_ids: tuple[str, ...] = ()
+    mcp_uc_schema: str | None = None
+
+
+def _parse_csv(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def load_settings(provider: ConfigProvider | None = None) -> AppSettings:
@@ -54,6 +64,9 @@ def load_settings(provider: ConfigProvider | None = None) -> AppSettings:
         preferred_model=cfg.get("PREFERRED_MODEL", "claude"),
         fallback_model=cfg.get("FALLBACK_MODEL", "databricks-gpt-fallback"),
         output_root=cfg.get("OUTPUT_ROOT", "./generated_apps"),
+        mcp_server_url=cfg.get("MCP_SERVER_URL") or None,
+        mcp_genie_space_ids=_parse_csv(cfg.get("MCP_GENIE_SPACE_IDS")),
+        mcp_uc_schema=cfg.get("MCP_UC_SCHEMA") or None,
     )
 
 

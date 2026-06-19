@@ -20,6 +20,10 @@ class Settings:
     appgen_dir: str
     output_root: str
     dry_run_default: bool
+    # MCP integration (disabled by default -> empty/None keeps existing behavior).
+    mcp_server_url: str | None = None
+    mcp_genie_space_ids: tuple[str, ...] = ()
+    mcp_uc_schema: str | None = None
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -27,6 +31,13 @@ def _env_bool(key: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def parse_csv_env(value: str | None) -> tuple[str, ...]:
+    """Parse a comma-separated env value into a tuple, dropping blanks."""
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def load_settings() -> Settings:
@@ -45,4 +56,7 @@ def load_settings() -> Settings:
         appgen_dir=os.getenv("APPGEN_DIR", ".appgen"),
         output_root=os.getenv("OUTPUT_ROOT", "./generated_apps"),
         dry_run_default=_env_bool("DRY_RUN_DEFAULT", True),
+        mcp_server_url=os.getenv("MCP_SERVER_URL") or None,
+        mcp_genie_space_ids=parse_csv_env(os.getenv("MCP_GENIE_SPACE_IDS")),
+        mcp_uc_schema=os.getenv("MCP_UC_SCHEMA") or None,
     )

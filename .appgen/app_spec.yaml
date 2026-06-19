@@ -1,4 +1,4 @@
-plan_id: c79a01a6-6835-4f38-8461-e90262df69a8
+plan_id: 79e59df6-11ea-4f96-b4de-49201995ea6f
 summary: Generated with endpoint=databricks_foundation_model_apis preferred_model=claude
 implementation_steps:
 - Validate intake completeness and access requirements

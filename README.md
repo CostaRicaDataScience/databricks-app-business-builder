@@ -101,12 +101,18 @@ Environment keys (see `.env.example`):
 - `DBX_SP_CLIENT_ID`
 - `DBX_SP_CLIENT_SECRET`
 - `FOUNDATION_MODEL_PROVIDER`
-- `FOUNDATION_MODEL_ENDPOINT`
+- `FOUNDATION_MODEL_ENDPOINT` — serving endpoint used for GenAI codegen
 - `PREFERRED_MODEL`
 - `FALLBACK_MODEL`
 - `APPGEN_DIR`
 - `OUTPUT_ROOT`
 - `DRY_RUN_DEFAULT`
+- `MCP_SERVER_URL` — Databricks MCP endpoint (`.../api/mcp/`); empty = disabled
+- `MCP_GENIE_SPACE_IDS` — comma-separated Genie space ids (MCP reuse checks)
+- `MCP_UC_SCHEMA` — optional Unity Catalog schema scope for MCP table checks
+
+Databricks Apps OBO (on-behalf-of-user) needs **no env vars** — the platform
+forwards the user token via request headers (see below).
 
 ## What this app can build
 
@@ -206,6 +212,61 @@ Recommended auth modes:
 - `service_principal` for controlled automation/deployment pipelines.
 
 If permissions are insufficient, preflight reports should identify missing capabilities before write actions.
+
+## Real Databricks integration
+
+Three capabilities make this app work against a real workspace. All three share
+the auth layer and degrade gracefully so local dev and tests run with no
+workspace.
+
+### 1. Databricks Apps OBO (on-behalf-of-user) auth
+
+When deployed inside Databricks Apps with **user authorization** enabled, the
+platform forwards the signed-in user's identity and OAuth token on every request
+as HTTP headers:
+
+- `X-Forwarded-Access-Token` — the user's OAuth access token (used for OBO)
+- `X-Forwarded-Email` / `X-Forwarded-User` — the user's identity
+
+The app reads these (`src/composer/databricks/obo.py`) and builds a
+**per-request** `WorkspaceClient(host=…, token=<forwarded token>)` so all
+Databricks calls (discovery, Genie/MCP, serving-endpoint codegen) run with that
+user's real permissions. The user token is **never cached** in a global client
+and **never logged** (the logger redacts it; it never appears in `/auth/status`).
+
+**Fallback chain** when the header is absent (local dev / not deployed as an
+App): existing env/profile/service-principal config is used. The active mode is
+always reported by `/auth/status` as one of:
+
+- `databricks_app_obo` — a forwarded user token was present (OBO)
+- `user_workspace` — host+token or `~/.databrickscfg` profile
+- `service_principal` — `DBX_SP_CLIENT_ID` + `DBX_SP_CLIENT_SECRET`
+
+**Enable OBO on the App side:** deploy with user authorization and configure the
+scopes your workspace needs (SQL, Unity Catalog, serving endpoints, Genie) so
+the platform forwards the user access token. See the commented `app.yaml`.
+
+### 2. MCP integration (Unity Catalog / Genie via Databricks MCP)
+
+A configurable MCP client (`src/composer/mcp/client.py`, Streamable HTTP
+transport, `Authorization: Bearer <OBO-or-fallback token>`) can verify UC
+tables/metadata during discovery and check real Genie spaces during reuse
+decisions. **Disabled by default** (empty `MCP_SERVER_URL` → heuristic discovery,
+unchanged behavior). Prefer a Databricks **Managed MCP** endpoint
+(`https://<app-url>.databricksapps.com/api/mcp/` — trailing `/api/mcp/` required).
+The labs `databrickslabs/mcp` UC server is deprecated. Full details and
+upstream-awareness guidance: [`docs/integrations/mcp.md`](docs/integrations/mcp.md).
+
+### 3. GenAI codegen via a serving endpoint
+
+The generated app **skeleton** (the bootstrap `app.py` and supporting files) is
+produced by a real model served via a Databricks **serving endpoint** inside the
+authenticated workspace (`FOUNDATION_MODEL_ENDPOINT`, default
+`databricks-claude-sonnet`), queried through the OBO/user `WorkspaceClient`
+(`src/composer/llm/client.py` → `WorkspaceClient.serving_endpoints.query`). The
+model output is written to disk by `src/composer/codegen/generator.py`. When no
+workspace/endpoint is available (local dev, tests, headless), a **deterministic
+template fallback** is used so the flow always completes.
 
 ## Repository structure
 

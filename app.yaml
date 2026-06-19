@@ -1,3 +1,37 @@
 name: databricks-app-business-builder
 description: Composer + AppGen unified builder
 command: uvicorn modules.app.main:app --host 0.0.0.0 --port 8000
+
+# --- Databricks Apps: enable OBO (on-behalf-of-user) ---
+# To make per-request user auth work, this app must be deployed with *user
+# authorization* enabled so the platform forwards the user's OAuth access token
+# (X-Forwarded-Access-Token) and identity (X-Forwarded-Email / X-Forwarded-User)
+# on every request. Configure the user authorization scopes your workspace
+# requires (e.g. SQL, Unity Catalog, serving endpoints, Genie) in the App's
+# settings so the forwarded token can call those APIs on the user's behalf.
+#
+# Example (illustrative — confirm exact scope names for your workspace):
+# user_authorization:
+#   scopes:
+#     - sql
+#     - serving.serving-endpoints
+#     - dashboards.genie
+#     - catalog.connections
+#
+# When OBO is enabled, /auth/status reports auth_mode=databricks_app_obo and all
+# Databricks calls (discovery, Genie/MCP, serving-endpoint codegen) run as the
+# signed-in user. Without it, the app falls back to env/profile/service-principal
+# config and reports auth_mode=user_workspace or service_principal.
+
+env:
+  # GenAI codegen serving endpoint (queried as the OBO user when available).
+  - name: FOUNDATION_MODEL_ENDPOINT
+    value: databricks-claude-sonnet
+  # Optional MCP integration — set to a Managed MCP endpoint to enable
+  # (trailing /api/mcp/ is required). Empty keeps heuristic discovery.
+  - name: MCP_SERVER_URL
+    value: ""
+  - name: MCP_GENIE_SPACE_IDS
+    value: ""
+  - name: MCP_UC_SCHEMA
+    value: ""

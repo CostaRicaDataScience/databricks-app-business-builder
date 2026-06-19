@@ -11,6 +11,9 @@ class DiscoveryStatus(str, Enum):
     MISSING = "missing"
     NEEDS_ENRICHMENT = "needs_enrichment"
     NEEDS_CREATION = "needs_creation"
+    # Honest status used when we could not verify the resource against a live
+    # workspace (e.g. not connected). We never claim "exists" without checking.
+    UNKNOWN = "unknown"
 
 
 @dataclass(slots=True)
@@ -74,6 +77,11 @@ class GeneratedArtifact:
     artifact_id: str
     output_path: str
     files_generated: list[str]
+    # How the skeleton was produced: "llm" (real serving endpoint) or
+    # "template" (deterministic offline fallback).
+    source: str = "template"
+    generator_endpoint: str | None = None
+    preview: str | None = None
 
 
 @dataclass(slots=True)

@@ -1,0 +1,12 @@
+to_create:
+- resource_type: serving_endpoint
+  name: databricks-claude-sonnet
+  method: POST
+  reason: "Endpoint del modelo de GenAI (pendiente de verificar conexi\xF3n)."
+  verified: false
+- resource_type: databricks_app
+  name: business-builder-generated-app
+  method: POST
+  reason: Publicar la app generada en el workspace.
+  verified: false
+blockers: []

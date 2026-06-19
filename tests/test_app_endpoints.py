@@ -70,9 +70,10 @@ def test_run_pipeline_returns_human_friendly_summary():
     # Named progress steps.
     step_keys = {step["key"] for step in s["steps"]}
     assert {"intake", "connect", "discovery", "autofix", "generate"} <= step_keys
-    # Discovery surfaced in plain terms.
-    assert "sales.gold_orders" in s["data"]["tables_found"]
-    assert "sales.gold_customers" in s["data"]["tables_improved"]
+    # Discovery surfaced in plain terms. Without a live workspace connection in
+    # tests, tables are honestly reported as unverified (never faked as found).
+    assert "sales.gold_orders" in s["data"]["tables_unverified"]
+    assert "sales.gold_customers" in s["data"]["tables_unverified"]
     # Existing vs to-create assistants.
     assert "sales_assistant" in s["assistants"]["existing"]
     assert "new_sales_genie" in s["assistants"]["to_create"]

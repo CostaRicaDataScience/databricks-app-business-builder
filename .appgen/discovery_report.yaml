@@ -1,16 +1,15 @@
-report_id: 8f206d18-763d-4e85-8833-f92b53080147
+report_id: 647f8af1-7901-405e-a934-64c42dc10546
 tables:
-- name: sales.gold_orders
-  status: exists
-  details: null
-- name: sales.gold_customers
-  status: needs_enrichment
-  details: Missing column comments
+- name: serverless_stable_ys5bgd_catalog.puc.gold_estudiante_360_genie
+  status: unknown
+  details: "No verificada: con\xE9ctate a Databricks para validar esta tabla."
+- name: serverless_stable_ys5bgd_catalog.puc.gold_research_acceleration_cockpit
+  status: unknown
+  details: "No verificada: con\xE9ctate a Databricks para validar esta tabla."
 genies:
-- name: sales_assistant
-  status: exists
-  details: null
-- name: new_sales_genie
-  status: needs_creation
-  details: Requested genie does not exist
-summary: Discovery report generated.
+- name: "(b\xFAsqueda de Genie)"
+  status: unknown
+  details: "No se pudo buscar asistentes: con\xE9ctate a Databricks para que busquemos\
+    \ Genies existentes."
+summary: 'Discovery report generated without a workspace connection: resources are
+  reported as unknown until you connect.'
