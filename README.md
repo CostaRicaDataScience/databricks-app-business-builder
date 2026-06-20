@@ -347,12 +347,58 @@ What the cascarón **emits** (and documents in the generated `README.md` /
   used as a structural reference only; the default emitted stack stays
   Streamlit/Python (a Node variant is optional/future).
 
+## Archetypes (DevHub-aligned)
+
+The builder classifies your intake into a supported archetype (mirroring the
+[DevHub templates](https://developers.databricks.com/templates)) and picks a
+build target. Catalog: `src/composer/archetypes/catalog.py`.
+
+| Archetype | What it builds | Required primitives | Default target | OAuth scopes |
+| --- | --- | --- | --- | --- |
+| `ai_chat` | Streaming AI chat + chat history | serving_endpoint, lakebase | appkit | `serving.serving-endpoints`, `sql` |
+| `crud_lakebase` | CRUD app on Lakebase Postgres | lakebase, uc_tables | appkit | `sql` |
+| `genie_analytics` | Embedded Genie conversational analytics | genie, uc_tables | python | `dashboards.genie`, `sql` |
+| `rag_chat` | RAG chat (pgvector + serving) | serving_endpoint, vector_search, lakebase | appkit | `serving.serving-endpoints`, `sql` |
+| `dashboard` | Operational dashboard (optional Genie) | uc_tables | python | `sql`, `dashboards.genie` |
+
+Two build targets, selected per archetype (and overridable via intake hints like
+"typescript"/"streamlit"):
+
+- `python` - FastAPI/Streamlit (default; matches the deployed builder).
+- `appkit` - DevHub AppKit/TypeScript via `databricks apps init` (needs Node +
+  Databricks CLI; behind a feature flag).
+
+## Clone -> run local -> deploy
+
+```bash
+# 1) clone + install
+uv venv && make install
+
+# 2) verify local dev env (DevHub "Set Up Your Local Dev Environment")
+databricks auth login --host https://<your-workspace>.cloud.databricks.com -p <profile>
+curl -s localhost:8000/dev/preflight   # after the server is up (CLI + valid profile + aitools)
+
+# 3) run locally
+.venv/bin/uvicorn modules.app.main:app --reload   # http://127.0.0.1:8000
+
+# 4) deploy as a Databricks App (bundle includes requirements.txt + app resource)
+export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com
+databricks bundle deploy -p <profile>
+databricks bundle run business_builder -p <profile>
+```
+
+Enable **user authorization (OBO)** on the App with the scopes for your
+archetype (see table). The pipeline's final `validate` step checks
+requirements/`app.yaml`/scopes and proposes fixes.
+
 ## Repository structure
 
-- `src/composer/` unified product implementation.
+- `src/composer/` unified product implementation
+  (`archetypes/`, `devhub/`, `codegen/` incl. `targets/`, `validate/`, ...).
 - `modules/` compatibility API layer kept during migration.
+- `agents/` + `skills/` agent/skill definitions (incl. the `app_builder` function).
 - `.appgen/` generated artifacts and approvals.
-- `examples/` end-to-end vertical examples.
+- `examples/` end-to-end vertical examples (see `university_genie_dashboard.md`).
 
 ## Project docs
 

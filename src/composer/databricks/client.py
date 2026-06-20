@@ -100,6 +100,60 @@ class DatabricksClient:
     def has_real_client(self) -> bool:
         return self.workspace_client is not None
 
+    def list_lakebase_instances(self) -> list[str] | None:
+        """List Lakebase (managed Postgres) database instance names.
+
+        Returns names, or ``None`` when we cannot read them (no client / SDK
+        without the ``database`` service / call failed) so callers stay honest.
+        See https://docs.databricks.com/api/workspace/database .
+        """
+        if self.workspace_client is None:
+            return None
+        database = getattr(self.workspace_client, "database", None)
+        if database is None:
+            return None
+        for method_name in ("list_database_instances", "list_instances", "list"):
+            fn = getattr(database, method_name, None)
+            if not callable(fn):
+                continue
+            try:
+                raw = fn()
+            except Exception as exc:  # pragma: no cover - depends on live workspace
+                log.info("lakebase_list_failed", method=method_name, error=str(exc))
+                return None
+            items = getattr(raw, "database_instances", None)
+            if not isinstance(items, (list, tuple)):
+                items = raw if isinstance(raw, (list, tuple)) else list(raw or [])
+            names: list[str] = []
+            for item in items:
+                name = getattr(item, "name", None) or getattr(item, "instance_name", None)
+                if name:
+                    names.append(str(name))
+            return names
+        return None
+
+    def get_lakebase_instance(self, name: str) -> dict | None:
+        """Fetch a single Lakebase instance by name, or ``None`` if unavailable."""
+        if self.workspace_client is None:
+            return None
+        database = getattr(self.workspace_client, "database", None)
+        if database is None:
+            return None
+        fn = getattr(database, "get_database_instance", None) or getattr(
+            database, "get_instance", None
+        )
+        if not callable(fn):
+            return None
+        try:
+            inst = fn(name=name)
+        except Exception as exc:  # pragma: no cover - depends on live workspace
+            log.info("lakebase_get_failed", name=name, error=str(exc))
+            return None
+        return {
+            "name": getattr(inst, "name", name),
+            "state": getattr(inst, "state", None),
+        }
+
     def list_resource_names(
         self, service: str, method: str = "list", **kwargs
     ) -> list[str] | None:

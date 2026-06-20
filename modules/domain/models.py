@@ -73,10 +73,27 @@ class BuildPlan:
 
 
 @dataclass(slots=True)
+class ArchetypeClassification:
+    """Result of mapping an intake to a supported archetype + build target."""
+
+    archetype_id: str
+    title: str
+    target: str
+    score: float
+    rationale: str
+    devhub_url: str | None = None
+    needs_help: bool = False
+    candidates: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class GeneratedArtifact:
     artifact_id: str
     output_path: str
     files_generated: list[str]
+    # Archetype + build target this app was generated for (Phase 1).
+    archetype_id: str | None = None
+    target: str = "python"
     # How the skeleton was produced: "llm" (real serving endpoint) or
     # "template" (deterministic offline fallback).
     source: str = "template"

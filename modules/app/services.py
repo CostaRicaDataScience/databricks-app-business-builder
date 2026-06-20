@@ -9,6 +9,8 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2] / "src"))
 
+from composer.archetypes import classify_intake, get_archetype
+from composer.codegen.targets import build_appkit_target, build_python_target
 from composer.blueprint.planner import build_blueprint
 from composer.blueprint.validate import validate_blueprint
 from composer.codegen.cascaron import emit_cascaron
@@ -27,6 +29,7 @@ from composer.models.blueprint import DiscoveryReport as ComposerDiscoveryReport
 from composer.models.intake import IntakeSpec
 from composer.permissions.preflight import run_preflight
 from composer.provision.tagging import enforce_tags
+from composer.validate import propose_fixes, should_redeploy, validate_app
 from modules.core.config import AppSettings
 from modules.core.logging import log
 from modules.infra.databricks_auth import DatabricksConnectionService
@@ -36,6 +39,7 @@ from modules.domain.models import (
     DiscoveryIntake,
     DiscoveryReport,
     DiscoveryStatus,
+    ArchetypeClassification,
     GenieDiscovery,
     GeneratedArtifact,
     ProvisioningResult,
@@ -117,6 +121,23 @@ class OrchestratorService:
             self.connection.composer_settings, workspace_client=workspace_client
         )
 
+    def classify_archetype(self, intake: DiscoveryIntake) -> ArchetypeClassification:
+        """Map the intake to the best-fit archetype + build target (Phase 1)."""
+        result = classify_intake(_to_intake_spec(intake))
+        arch = get_archetype(result.archetype_id)
+        classification = ArchetypeClassification(
+            archetype_id=result.archetype_id,
+            title=arch.title if arch else result.archetype_id,
+            target=result.target,
+            score=result.score,
+            rationale=result.rationale,
+            devhub_url=arch.devhub_url if arch else None,
+            needs_help=result.needs_help,
+            candidates=[aid for aid, _ in result.candidates],
+        )
+        self.artifacts.save_dict("archetype_classification.yaml", asdict(classification))
+        return classification
+
     def run_discovery(self, intake_id: str, auth: RequestAuth | None = None) -> DiscoveryReport:
         intake = self._require_intake(intake_id)
         # Only use the live workspace for real verification when we are actually
@@ -191,8 +212,9 @@ class OrchestratorService:
         auth: RequestAuth | None = None,
         inventory: dict | None = None,
         connected: bool | None = None,
+        classification: ArchetypeClassification | None = None,
     ) -> GeneratedArtifact:
-        plan = self._require_plan(plan_id)
+        self._require_plan(plan_id)  # validate the plan exists
         intake = next(iter(self.intake_repo.list()), None)
         if intake is None:
             raise ValueError("No intake found to generate blueprint")
@@ -222,6 +244,14 @@ class OrchestratorService:
         # Emits app.manifest.yaml (source of truth), EXECUTION_PLAN.md,
         # CONTRACTS.yaml, spec/* and app/ stub files with TODO(build-out)
         # markers. This is what the Phase B build-out LLM follows.
+        archetype_meta = None
+        if classification is not None:
+            archetype_meta = {
+                "id": classification.archetype_id,
+                "target": classification.target,
+                "devhub_url": classification.devhub_url,
+                "title": classification.title,
+            }
         cascaron = emit_cascaron(
             app_dir=output_path,
             blueprint=blueprint,
@@ -230,10 +260,34 @@ class OrchestratorService:
             inventory=inventory,
             codegen_endpoint=llm.endpoint,
             planner_endpoint=llm.planner_endpoint,
+            archetype=archetype_meta,
         )
+        # -- Target plan (python vs appkit) -------------------------------
+        # Per-archetype target selection. Python writes design-system tokens;
+        # AppKit records an init plan (executed only when the feature flag is on).
+        extra_files_to_record: set[str] = set()
+        target = classification.target if classification else "python"
+        arch_obj = get_archetype(classification.archetype_id) if classification else None
+        if arch_obj is not None:
+            has_genie = bool(composer_discovery.genies or intake_spec.existing_genies)
+            if target == "appkit":
+                target_plan = build_appkit_target(
+                    arch_obj, intake_spec, app_dir=output_path, enabled=False
+                )
+            else:
+                target_plan = build_python_target(
+                    arch_obj, intake_spec, has_genie=has_genie
+                )
+                for rel, body in (target_plan.get("extra_files") or {}).items():
+                    written = self._safe_write_output(output_path, rel, body)
+                    if written:
+                        extra_files_to_record.add(written)
+            self.artifacts.save_dict("target_plan.yaml", target_plan)
+
         # Always drop a RESOURCES.md so the skeleton documents the workspace
         # GET inventory and the POST plan, even in the offline template path.
         extra_files = set(cascaron.get("scaffold_files") or [])
+        extra_files |= extra_files_to_record
         if inventory is not None:
             self._write_resources_doc(output_path, inventory)
             extra_files.add(str(Path(output_path) / "RESOURCES.md"))
@@ -264,6 +318,8 @@ class OrchestratorService:
             artifact_id=str(uuid.uuid4()),
             output_path=output_path,
             files_generated=generated["files_generated"],
+            archetype_id=(classification.archetype_id if classification else None),
+            target=(classification.target if classification else "python"),
             source=source,
             generator_endpoint=llm.endpoint if source == "llm" else None,
             preview=preview,
@@ -287,6 +343,20 @@ class OrchestratorService:
             },
         )
         return artifact
+
+    @staticmethod
+    def _safe_write_output(output_path: str, rel_path: str, body: str) -> str | None:
+        """Write a target file under the generated app dir; refuse path escapes."""
+        base = Path(output_path).resolve()
+        target = (base / rel_path).resolve()
+        if base != target and base not in target.parents:
+            return None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding="utf-8")
+            return str(target)
+        except Exception:  # pragma: no cover - best effort
+            return None
 
     @staticmethod
     def _write_resources_doc(output_path: str, inventory: dict) -> None:
@@ -426,6 +496,20 @@ class OrchestratorService:
             {"key": "intake", "title": "Capturamos tus requerimientos", "status": "done"}
         )
 
+        # Step 1b - classify the archetype + build target (DevHub-aligned).
+        classification = self.classify_archetype(intake)
+        steps.append(
+            {
+                "key": "classify",
+                "title": "Identificamos el tipo de app",
+                "status": "needs_attention" if classification.needs_help else "done",
+                "detail": (
+                    f"{classification.title} (target {classification.target}). "
+                    + classification.rationale
+                ),
+            }
+        )
+
         # Step 2 - connection + permission preview (the moment we connect).
         auth_info = self.auth_status(auth)
         capabilities = {p["key"]: p["satisfied"] for p in auth_info["permissions"]}
@@ -509,12 +593,19 @@ class OrchestratorService:
         )
 
         # Step 5 - inventory: GET existing workspace resources, map POSTs to make.
+        _arch = get_archetype(classification.archetype_id)
+        _required = (
+            tuple(_arch.required_primitives) + tuple(_arch.optional_primitives)
+            if _arch
+            else ()
+        )
         inventory = collect_inventory(
             client=self.connection.databricks_client(auth),
             intake=_to_intake_spec(intake),
             discovery=_to_composer_discovery(report),
             serving_endpoint=self.connection.composer_settings.foundation_model_endpoint,
             connected=auth_info["connected"],
+            required_primitives=_required,
         )
         self.artifacts.save_dict("resource_inventory.yaml", inventory["resources"])
         self.artifacts.save_dict(
@@ -537,7 +628,11 @@ class OrchestratorService:
         # Step 6 - build plan + generate cascarón scaffold (with the inventory).
         plan = self.build_plan(intake_id, dry_run=True, run_provisioning=False)
         artifact = self.generate(
-            plan.plan_id, auth, inventory=inventory, connected=auth_info["connected"]
+            plan.plan_id,
+            auth,
+            inventory=inventory,
+            connected=auth_info["connected"],
+            classification=classification,
         )
         n_built = len(artifact.files_built_out)
         n_pending = len(artifact.files_to_generate)
@@ -559,6 +654,24 @@ class OrchestratorService:
                 "title": "Generamos el esqueleto (cascarón) de tu app",
                 "status": "done",
                 "detail": gen_detail,
+            }
+        )
+
+        # Step 7 - validation (DevHub "run and test"): static checks now, plus
+        # deployed smoke/log triage when a URL is available later.
+        validation = validate_app(artifact.output_path)
+        fixes = propose_fixes(validation)
+        self.artifacts.save_dict("validation_report.yaml", validation)
+        steps.append(
+            {
+                "key": "validate",
+                "title": "Validamos la app generada",
+                "status": "done" if validation["ok"] else "needs_attention",
+                "detail": (
+                    "Todas las verificaciones pasaron."
+                    if validation["ok"]
+                    else f"{len(validation['failures'])} verificación(es) por corregir."
+                ),
             }
         )
 
@@ -591,6 +704,15 @@ class OrchestratorService:
         summary = {
             "headline": "Listo: ejecutamos el flujo completo con tus requerimientos.",
             "steps": steps,
+            "archetype": {
+                "id": classification.archetype_id,
+                "title": classification.title,
+                "target": classification.target,
+                "devhub_url": classification.devhub_url,
+                "rationale": classification.rationale,
+                "needs_help": classification.needs_help,
+                "candidates": classification.candidates,
+            },
             "connection": {
                 "connected": auth_info["connected"],
                 "host": auth_info["host"],
@@ -629,6 +751,12 @@ class OrchestratorService:
                     "files_generated": artifact.files_built_out,
                     "files_to_generate": artifact.files_to_generate,
                 },
+            },
+            "validation": {
+                "ok": validation["ok"],
+                "checks": validation["checks"],
+                "fixes": fixes,
+                "should_redeploy": should_redeploy(validation),
             },
             "resources": inventory["resources"],
             "to_create": inventory["to_create"],

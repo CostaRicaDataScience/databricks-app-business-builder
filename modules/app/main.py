@@ -90,6 +90,18 @@ def auth_connect(request: Request) -> dict:
     return orchestrator.connect(_request_auth(request))
 
 
+@app.get('/dev/preflight')
+def dev_preflight() -> dict:
+    """Local dev environment preflight (Databricks CLI + valid profile + aitools).
+
+    Intended for local development; in a deployed Databricks App there is no CLI,
+    so this returns ``cli_installed=False`` and is informational only.
+    """
+    from composer.deploy.local_dev import local_dev_preflight
+
+    return local_dev_preflight()
+
+
 @app.post('/run')
 def run_pipeline(payload: RunPipelineRequest, request: Request) -> dict:
     """Single entrypoint: run intake -> discovery -> autofix -> plan -> generate.
@@ -580,8 +592,11 @@ _HOME_HTML = r"""
         html += '<div class="section-title">Por crear (POST)</div><div class="kv">';
         s.to_create.forEach(function (it) {
           var v = it.verified ? "" : " · pendiente de verificar";
-          html += "<div>➕ <b>" + esc(it.resource_type) + "</b> " + esc(it.name) +
-            " — " + esc(it.reason) + esc(v) + "</div>";
+          var d = it.decision || "create";
+          var icon = d === "reuse" ? "♻️" : (d === "skip" ? "⤫" : "➕");
+          var badge = " <span class='muted'>[" + esc(d) + "]</span>";
+          html += "<div>" + icon + " <b>" + esc(it.resource_type) + "</b> " + esc(it.name) +
+            badge + " — " + esc(it.reason) + esc(v) + "</div>";
         });
         html += "</div>";
       }
@@ -589,6 +604,22 @@ _HOME_HTML = r"""
       if (s.blockers && s.blockers.length) {
         html += '<div class="section-title">Bloqueos</div><div class="kv">';
         html += s.blockers.map(function (x) { return "⛔ " + esc(x); }).join("<br/>");
+        html += "</div>";
+      }
+
+      var val = s.validation || null;
+      if (val) {
+        html += '<div class="section-title">Validación</div><div class="kv">';
+        (val.checks || []).forEach(function (c) {
+          html += "<div>" + (c.ok ? "✅" : "⚠️") + " <b>" + esc(c.name) + "</b> — " +
+            esc(c.detail) + "</div>";
+        });
+        (val.fixes || []).forEach(function (f) {
+          html += "<div>🔧 " + esc(f.fix) + "</div>";
+        });
+        if (val.should_redeploy) {
+          html += "<div class='muted'>Sugerencia: corrige y vuelve a desplegar.</div>";
+        }
         html += "</div>";
       }
 

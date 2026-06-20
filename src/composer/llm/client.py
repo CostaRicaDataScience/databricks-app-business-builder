@@ -173,6 +173,8 @@ class LLMClient:
 
         plan_text = self._read_optional(base / "EXECUTION_PLAN.md")
         contracts_text = self._read_optional(base / "CONTRACTS.yaml")
+        agents_text = self._read_optional(base / "AGENTS.md")
+        devhub_text = self._fetch_devhub_context(base, manifest)
         tags = request_tags or DEFAULT_REQUEST_TAGS
 
         files = manifest.get("files") or []
@@ -184,7 +186,7 @@ class LLMClient:
             if not isinstance(rel_path, str) or not rel_path.strip():
                 continue
             prompt = self._build_buildout_prompt(
-                entry, manifest, plan_text, contracts_text
+                entry, manifest, plan_text, contracts_text, agents_text, devhub_text
             )
             content = self._query_planner(prompt, request_tags=tags)
             if not content:
@@ -240,6 +242,23 @@ class LLMClient:
             return ""
 
     @staticmethod
+    def _fetch_devhub_context(base: Path, manifest: dict) -> str:
+        """Best-effort: fetch the archetype's DevHub template markdown (cached).
+
+        Never raises and degrades to "" offline so the build-out always runs.
+        """
+        url = (manifest.get("archetype") or {}).get("devhub_url")
+        if not url:
+            return ""
+        try:
+            from composer.devhub import DevHubFetcher
+
+            text = DevHubFetcher(cache_dir=base / ".devhub_cache").fetch_template(url)
+            return text or ""
+        except Exception:  # pragma: no cover - best effort
+            return ""
+
+    @staticmethod
     def _write_buildout_file(base: Path, rel_path: str, content: str) -> bool:
         """Write a build-out file, refusing paths that escape ``base``."""
         target = (base / rel_path).resolve()
@@ -260,12 +279,30 @@ class LLMClient:
         manifest: dict,
         plan_text: str,
         contracts_text: str,
+        agents_text: str = "",
+        devhub_text: str = "",
     ) -> str:
         intake = manifest.get("intake", {})
         runtime = manifest.get("runtime", {})
         dbx = runtime.get("databricks_apps", {})
+        archetype = manifest.get("archetype", {})
+        context_blocks = ""
+        if agents_text:
+            context_blocks += (
+                "\nWorkspace defaults + design system (AGENTS.md):\n"
+                f"{agents_text[:3000]}\n"
+            )
+        if devhub_text:
+            context_blocks += (
+                f"\nDevHub template '{archetype.get('title') or archetype.get('id')}' "
+                "(canonical what-to-build) excerpt:\n"
+                f"{devhub_text[:3000]}\n"
+            )
         return (
             f"Implement this single file of the Databricks App: {entry.get('path')}\n"
+            f"Archetype: {archetype.get('title') or archetype.get('id')} "
+            f"(target {archetype.get('target', 'python')})\n"
+            f"{context_blocks}"
             f"Responsibility: {entry.get('purpose')}\n"
             f"Depends on: {', '.join(entry.get('depends_on') or []) or '(none)'}\n"
             f"Task id: {entry.get('produced_by_task')}\n\n"
@@ -299,28 +336,19 @@ class LLMClient:
         response is not a parseable chat-completions object (so the caller can
         leave the file ``to_generate``).
         """
-        body = {
-            "messages": [
-                {"role": "system", "content": _BUILDOUT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 4000,
-        }
-        headers = {}
-        if request_tags:
-            # Tags are passed as a JSON-encoded header value per the AI Gateway doc.
-            headers["Databricks-Ai-Gateway-Request-Tags"] = json.dumps(request_tags)
-        try:
-            api_client = self.workspace_client.api_client  # type: ignore[attr-defined]
-            response = api_client.do(
-                "POST",
-                f"/serving-endpoints/{self.planner_endpoint}/invocations",
-                body=body,
-                headers=headers,
-            )
-        except Exception as exc:  # pragma: no cover - depends on live endpoint
-            log.error("llm_buildout_query_failed", error=str(exc))
+        from composer.llm.ai_gateway import chat_completion
+
+        messages = [
+            {"role": "system", "content": _BUILDOUT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        response = chat_completion(
+            self.workspace_client,
+            self.planner_endpoint,
+            messages,
+            request_tags=request_tags,
+        )
+        if response is None:
             return None
         # Real AI Gateway responses are JSON objects; anything else (e.g. a mock
         # without a configured return) is treated as "no content" so we degrade.

@@ -50,6 +50,7 @@ from pathlib import Path
 
 import yaml
 
+from composer.codegen.agents_md import build_agents_md
 from composer.models.blueprint import AppBlueprint, DiscoveryReport
 from composer.models.intake import IntakeSpec
 
@@ -181,6 +182,7 @@ def _build_manifest(
     codegen_endpoint: str,
     planner_endpoint: str,
     file_plan: list[dict],
+    archetype: dict | None = None,
 ) -> dict:
     genie_refs = [g.name for g in (discovery.genies if discovery else [])]
     genie_refs += [g for g in intake.existing_genies if g not in genie_refs]
@@ -198,6 +200,7 @@ def _build_manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "databricks-app-cascaron",
+        "archetype": archetype or {"id": None, "target": "python", "devhub_url": None},
         "project": {
             "name": "business-builder-generated-app",
             "slug": _slug(blueprint),
@@ -574,6 +577,7 @@ def emit_cascaron(
     inventory: dict | None = None,
     codegen_endpoint: str = "databricks-claude-sonnet",
     planner_endpoint: str = "databricks-claude-opus-4",
+    archetype: dict | None = None,
 ) -> dict:
     """Emit the deterministic cascarón scaffold into ``app_dir``.
 
@@ -596,6 +600,7 @@ def emit_cascaron(
         codegen_endpoint=codegen_endpoint,
         planner_endpoint=planner_endpoint,
         file_plan=file_plan,
+        archetype=archetype,
     )
 
     written: list[str] = []
@@ -641,9 +646,10 @@ def emit_cascaron(
             )
         )
 
-    # 5) app.yaml + README.md
+    # 5) app.yaml + README.md + AGENTS.md (workspace defaults for coding agents)
     _record(_safe_write(base, "app.yaml", _build_app_yaml(manifest, inventory)))
     _record(_safe_write(base, "README.md", _build_readme(manifest)))
+    _record(_safe_write(base, "AGENTS.md", build_agents_md(manifest)))
 
     # 6) Stub files (app/...) with TODO(build-out) markers.
     for entry in file_plan:

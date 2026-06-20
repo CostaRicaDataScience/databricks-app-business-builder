@@ -121,10 +121,8 @@ class DiscoveryService:
         known_spaces = space_titles or mcp_spaces
 
         genies: list[DiscoveryResourceStatus] = []
-        had_search_request = False
         for genie in intake.existing_genies:
             if is_search_request(genie):
-                had_search_request = True
                 genies.extend(
                     self._handle_genie_search(
                         searched_spaces, space_titles, workspace_live

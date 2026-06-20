@@ -48,19 +48,33 @@ def collect_inventory(
     discovery: DiscoveryReport,
     serving_endpoint: str,
     connected: bool,
+    required_primitives: tuple[str, ...] | None = None,
 ) -> dict:
     """Return ``{resources, to_create, blockers}`` after GET-ing the workspace.
 
     ``client`` is a ``composer.databricks.client.DatabricksClient`` (or None).
     ``connected`` gates real reads so we never fake results when offline.
+    ``required_primitives`` (from the chosen archetype) gates optional reads such
+    as Lakebase so we only plan what the app actually needs. Each ``to_create``
+    item carries a ``decision`` field (``create``|``reuse``|``skip``) that the
+    per-resource approval gate (Phase 2) can flip; the default is ``create``.
     """
     live = bool(
         connected and client is not None and getattr(client, "has_real_client", lambda: False)()
     )
+    needs = set(required_primitives or ())
 
     resources: dict[str, dict] = {}
     to_create: list[dict] = []
     blockers: list[str] = []
+
+    def _post(item: dict) -> dict:
+        item.setdefault("decision", "create")
+        # A stable id lets the approval gate reference each resource.
+        item.setdefault(
+            "resource_id", f"{item.get('resource_type')}:{item.get('name')}"
+        )
+        return item
 
     # -- serving endpoints (for the GenAI model that writes the app) ------
     endpoints = client.list_resource_names("serving_endpoints") if live else None  # type: ignore[union-attr]
@@ -69,13 +83,13 @@ def collect_inventory(
             False, None, "No verificado (requiere conexión)."
         )
         to_create.append(
-            {
+            _post({
                 "resource_type": "serving_endpoint",
                 "name": serving_endpoint,
                 "method": "POST",
                 "reason": "Endpoint del modelo de GenAI (pendiente de verificar conexión).",
                 "verified": False,
-            }
+            })
         )
     else:
         resources["serving_endpoints"] = _resource(
@@ -83,13 +97,13 @@ def collect_inventory(
         )
         if serving_endpoint not in endpoints:
             to_create.append(
-                {
+                _post({
                     "resource_type": "serving_endpoint",
                     "name": serving_endpoint,
                     "method": "POST",
                     "reason": "No existe el endpoint del modelo de GenAI requerido.",
                     "verified": True,
-                }
+                })
             )
 
     # -- tables (from the verified discovery report) ----------------------
@@ -125,13 +139,13 @@ def collect_inventory(
     )
     for genie in genie_to_create:
         to_create.append(
-            {
+            _post({
                 "resource_type": "genie_space",
                 "name": genie if not genie.startswith("(") else "asistente sugerido",
                 "method": "POST",
                 "reason": "Crear el asistente Genie para el caso de uso.",
                 "verified": live,
-            }
+            })
         )
 
     # -- volumes (UC) ----------------------------------------------------
@@ -179,15 +193,58 @@ def collect_inventory(
         ),
     )
 
+    # -- lakebase (only when the archetype needs persistence) ------------
+    if "lakebase" in needs:
+        instances = client.list_lakebase_instances() if live else None  # type: ignore[union-attr]
+        if instances is None:
+            resources["lakebase"] = _resource(
+                False, None, "No verificado (requiere conexión)."
+            )
+            to_create.append(
+                _post({
+                    "resource_type": "lakebase_instance",
+                    "name": "business-builder-lakebase",
+                    "method": "POST",
+                    "reason": "Instancia Lakebase (Postgres) para persistencia/estado de la app.",
+                    "verified": False,
+                })
+            )
+        else:
+            resources["lakebase"] = _resource(
+                True, instances, f"{len(instances)} instancia(s) encontrada(s)."
+            )
+            if not instances:
+                to_create.append(
+                    _post({
+                        "resource_type": "lakebase_instance",
+                        "name": "business-builder-lakebase",
+                        "method": "POST",
+                        "reason": "No existe una instancia Lakebase; crear una para persistencia.",
+                        "verified": True,
+                    })
+                )
+            else:
+                # Reuse the first existing instance by default.
+                to_create.append(
+                    _post({
+                        "resource_type": "lakebase_instance",
+                        "name": instances[0],
+                        "method": "REUSE",
+                        "reason": "Reutilizar la instancia Lakebase existente.",
+                        "verified": True,
+                        "decision": "reuse",
+                    })
+                )
+
     # -- the Databricks App itself (always a create/POST) ----------------
     to_create.append(
-        {
+        _post({
             "resource_type": "databricks_app",
             "name": "business-builder-generated-app",
             "method": "POST",
             "reason": "Publicar la app generada en el workspace.",
             "verified": live,
-        }
+        })
     )
 
     return {
